@@ -1,0 +1,24 @@
+{
+  "name": "tldraw-offline-mcp",
+  "version": "0.1.0",
+  "description": "Remote MCP control server for tldraw Desktop's offline Canvas API",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "./scripts/start.sh",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun test",
+    "token": "bun scripts/generate-token.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "hono": "4.12.30",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "typescript": "5.9.3"
+  }
+}
