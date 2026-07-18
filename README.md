@@ -4,6 +4,11 @@ A Bun + Hono MCP server that gives a remote agent complete control of tldraw Des
 
 The server runs on the Mac beside tldraw. Remote clients receive virtual workspace paths and inline MCP images—never unusable Mac paths or the app's bearer token.
 
+## TODO
+
+- should be managed by `neo`
+- efficiency around mcp docs reading requests
+
 ## Requirements
 
 - macOS with tldraw Desktop and its Canvas API
@@ -29,8 +34,6 @@ bun run start
 ```
 
 The script starts the MCP server on `127.0.0.1:7237` and runs Tailscale Serve in HTTP-only mode on port 80. It prints the remote MCP URL and keeps both processes in the foreground until you press Ctrl-C.
-
-TODO: should be managed by `neo`
 
 Local endpoints:
 
