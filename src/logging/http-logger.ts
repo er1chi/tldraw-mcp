@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { MiddlewareHandler } from 'hono'
+import { writeLog } from './log.ts'
 
 interface JsonRpcMessageSummary {
   id?: string | number | null
@@ -111,10 +112,6 @@ function summarizeJsonRpcMessage(value: unknown): JsonRpcMessageSummary {
   }
 
   return summary
-}
-
-function writeLog(entry: Record<string, unknown>): void {
-  console.log(JSON.stringify({ timestamp: new Date().toISOString(), ...entry }))
 }
 
 function numberHeader(value: string | undefined): number | undefined {
