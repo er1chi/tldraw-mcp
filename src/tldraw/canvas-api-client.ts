@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import type { AppConfig } from "../config.ts";
+import { writeLog } from "../logging/log.ts";
 import { TldrawMcpError } from "./errors.ts";
 
 export interface TldrawServerInfo {
@@ -7,6 +10,15 @@ export interface TldrawServerInfo {
   token: string;
   pid?: number;
   startedAt?: number;
+}
+
+type ServerState =
+  | { info: TldrawServerInfo; error?: never }
+  | { info?: never; error: TldrawMcpError };
+
+interface FetchResult {
+  response: Response;
+  info: TldrawServerInfo;
 }
 
 interface AppEnvelope<T> {
@@ -41,6 +53,10 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+const MAX_REQUEST_ATTEMPTS = 4;
+const BASE_RETRY_DELAY_MS = 100;
+const MAX_RETRY_DELAY_MS = 2_000;
+
 function mergedSignal(
   signal: AbortSignal | undefined,
   timeoutMs: number,
@@ -56,45 +72,88 @@ function assertDocId(docId: string): string {
   return docId;
 }
 
+function parseServerInfo(text: string): TldrawServerInfo {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new TldrawMcpError(
+      "tldraw server.json is invalid JSON",
+      "INVALID_SERVER_FILE",
+      error,
+    );
+  }
+
+  const info = parsed as Partial<TldrawServerInfo>;
+  if (
+    !Number.isInteger(info.port) ||
+    (info.port ?? 0) <= 0 ||
+    typeof info.token !== "string" ||
+    !info.token
+  ) {
+    throw new TldrawMcpError(
+      "tldraw server.json is missing a valid port or token",
+      "INVALID_SERVER_FILE",
+    );
+  }
+  return info as TldrawServerInfo;
+}
+
+function serverFileNotFound(error: unknown): TldrawMcpError {
+  return new TldrawMcpError(
+    "tldraw is not running: server.json was not found",
+    "APP_NOT_RUNNING",
+    error,
+  );
+}
+
+function retryDelayMs(retry: number): number {
+  const ceiling = Math.min(
+    MAX_RETRY_DELAY_MS,
+    BASE_RETRY_DELAY_MS * 2 ** retry,
+  );
+  return Math.floor(ceiling / 2 + Math.random() * (ceiling / 2));
+}
+
+function sessionSummary(info: TldrawServerInfo | undefined): Record<string, unknown> | null {
+  if (!info) return null;
+  return { port: info.port, pid: info.pid, startedAt: info.startedAt };
+}
+
+function errorSummary(error: unknown): Record<string, unknown> {
+  return {
+    code: error instanceof TldrawMcpError ? error.code : undefined,
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function requestPath(path: string): string {
+  return path.replace(/^\/api\/doc\/[^/]+/, "/api/doc/:documentId");
+}
+
 export class CanvasApiClient {
-  constructor(private readonly config: AppConfig) {}
+  private serverState: ServerState;
+  private lastKnownServerInfo: TldrawServerInfo | undefined;
+
+  constructor(
+    private readonly config: AppConfig,
+    private readonly log: typeof writeLog = writeLog,
+  ) {
+    this.serverState = this.readServerJsonFileSync();
+    this.lastKnownServerInfo = this.serverState.info;
+    if (this.serverState.error) {
+      this.log({
+        level: "warn",
+        event: "canvas.session.unavailable",
+        message: "Canvas API session was unavailable during initialization",
+        reason: errorSummary(this.serverState.error),
+      });
+    }
+  }
 
   async serverInfo(): Promise<TldrawServerInfo> {
-    let text: string;
-    try {
-      text = await readFile(this.config.tldrawServerJson, "utf8");
-    } catch (error) {
-      throw new TldrawMcpError(
-        "tldraw is not running: server.json was not found",
-        "APP_NOT_RUNNING",
-        error,
-      );
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch (error) {
-      throw new TldrawMcpError(
-        "tldraw server.json is invalid JSON",
-        "INVALID_SERVER_FILE",
-        error,
-      );
-    }
-
-    const info = parsed as Partial<TldrawServerInfo>;
-    if (
-      !Number.isInteger(info.port) ||
-      (info.port ?? 0) <= 0 ||
-      typeof info.token !== "string" ||
-      !info.token
-    ) {
-      throw new TldrawMcpError(
-        "tldraw server.json is missing a valid port or token",
-        "INVALID_SERVER_FILE",
-      );
-    }
-    return info as TldrawServerInfo;
+    if (this.serverState.error) throw this.serverState.error;
+    return this.serverState.info;
   }
 
   async readiness(signal?: AbortSignal): Promise<{
@@ -103,8 +162,7 @@ export class CanvasApiClient {
     startedAt?: number;
     port: number;
   }> {
-    const info = await this.serverInfo();
-    await this.requestText("/", { method: "GET", signal });
+    const { info } = await this.requestText("/", { method: "GET", signal });
     return {
       running: true,
       pid: info.pid,
@@ -114,7 +172,7 @@ export class CanvasApiClient {
   }
 
   async readme(signal?: AbortSignal): Promise<string> {
-    return this.requestText("/readme", { method: "GET", signal });
+    return (await this.requestText("/readme", { method: "GET", signal })).text;
   }
 
   async search<T = unknown>(code: string, signal?: AbortSignal): Promise<T> {
@@ -169,7 +227,7 @@ export class CanvasApiClient {
     path: string,
     init: RequestInit,
   ): Promise<T> {
-    const response = await this.fetchWithRefresh(path, init);
+    const { response } = await this.fetchWithRetry(path, init);
     const raw = await response.text();
     this.assertSize(raw.length);
 
@@ -194,8 +252,11 @@ export class CanvasApiClient {
     return payload.result as T;
   }
 
-  private async requestText(path: string, init: RequestInit): Promise<string> {
-    const response = await this.fetchWithRefresh(path, init);
+  private async requestText(
+    path: string,
+    init: RequestInit,
+  ): Promise<{ text: string; info: TldrawServerInfo }> {
+    const { response, info } = await this.fetchWithRetry(path, init);
     const text = await response.text();
     this.assertSize(text.length);
     if (!response.ok)
@@ -204,7 +265,7 @@ export class CanvasApiClient {
         "UPSTREAM_ERROR",
         text,
       );
-    return text;
+    return { text, info };
   }
 
   private assertSize(length: number): void {
@@ -216,17 +277,175 @@ export class CanvasApiClient {
     }
   }
 
-  private async fetchWithRefresh(
+  private readServerJsonFileSync(): ServerState {
+    let text: string;
+    try {
+      text = readFileSync(this.config.tldrawServerJson, "utf8");
+    } catch (error) {
+      return { error: serverFileNotFound(error) };
+    }
+
+    try {
+      return { info: parseServerInfo(text) };
+    } catch (error) {
+      return { error: error as TldrawMcpError };
+    }
+  }
+
+  private async readServerJsonFile(): Promise<TldrawServerInfo> {
+    const previous = this.lastKnownServerInfo;
+    let text: string;
+    try {
+      text = await readFile(this.config.tldrawServerJson, "utf8");
+    } catch (error) {
+      const unavailable = serverFileNotFound(error);
+      this.serverState = { error: unavailable };
+      this.log({
+        level: "warn",
+        event: "canvas.session.refresh_failed",
+        message: "Could not refresh the Canvas API session from server.json",
+        reason: errorSummary(unavailable),
+      });
+      throw unavailable;
+    }
+
+    try {
+      const info = parseServerInfo(text);
+      this.serverState = { info };
+      this.lastKnownServerInfo = info;
+      this.log({
+        level: "info",
+        event: "canvas.session.refreshed",
+        message: "Refreshed the Canvas API session from server.json",
+        previousSession: sessionSummary(previous),
+        currentSession: sessionSummary(info),
+        portChanged: previous ? previous.port !== info.port : undefined,
+        pidChanged: previous ? previous.pid !== info.pid : undefined,
+        startedAtChanged: previous ? previous.startedAt !== info.startedAt : undefined,
+        tokenChanged: previous ? previous.token !== info.token : undefined,
+      });
+      return info;
+    } catch (error) {
+      const invalid = error as TldrawMcpError;
+      this.serverState = { error: invalid };
+      this.log({
+        level: "warn",
+        event: "canvas.session.refresh_failed",
+        message: "Could not refresh the Canvas API session from server.json",
+        reason: errorSummary(invalid),
+      });
+      throw error;
+    }
+  }
+
+  private async fetchWithRetry(
     path: string,
     init: RequestInit,
-  ): Promise<Response> {
-    let info = await this.serverInfo();
-    let response = await this.fetchOnce(info, path, init);
-    if (response.status === 401) {
-      info = await this.serverInfo();
-      response = await this.fetchOnce(info, path, init);
+  ): Promise<FetchResult> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < MAX_REQUEST_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        const backoffMs = retryDelayMs(attempt - 1);
+        this.log({
+          level: "warn",
+          event: "canvas.request.retry",
+          message: "Retrying the Canvas API request after refreshing server.json",
+          method: init.method,
+          path: requestPath(path),
+          attempt: attempt + 1,
+          maxAttempts: MAX_REQUEST_ATTEMPTS,
+          backoffMs,
+          reason: errorSummary(lastError),
+        });
+        await delay(backoffMs, undefined, {
+          signal: init.signal ?? undefined,
+        });
+        try {
+          await this.readServerJsonFile();
+        } catch (error) {
+          lastError = error;
+          continue;
+        }
+      }
+
+      let info: TldrawServerInfo;
+      try {
+        info = await this.serverInfo();
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+
+      try {
+        const response = await this.fetchOnce(info, path, init);
+        if (response.status !== 401) {
+          if (!response.ok) {
+            this.log({
+              level: "warn",
+              event: "canvas.request.upstream_error",
+              message: "Canvas API returned an error response",
+              method: init.method,
+              path: requestPath(path),
+              status: response.status,
+              session: sessionSummary(info),
+            });
+          }
+          return { response, info };
+        }
+
+        const unauthorized = new TldrawMcpError(
+          "Canvas API rejected the cached server.json token",
+          "UPSTREAM_UNAUTHORIZED",
+        );
+        lastError = unauthorized;
+        this.log({
+          level: attempt === MAX_REQUEST_ATTEMPTS - 1 ? "error" : "warn",
+          event: "canvas.request.unauthorized",
+          message: unauthorized.message,
+          method: init.method,
+          path: requestPath(path),
+          status: response.status,
+          attempt: attempt + 1,
+          maxAttempts: MAX_REQUEST_ATTEMPTS,
+          willRetry: attempt < MAX_REQUEST_ATTEMPTS - 1,
+          session: sessionSummary(info),
+        });
+        if (attempt === MAX_REQUEST_ATTEMPTS - 1) return { response, info };
+        await response.body?.cancel();
+      } catch (error) {
+        if (init.signal?.aborted) throw error;
+        const stale = new TldrawMcpError(
+          "tldraw is not running: the server.json session is stale",
+          "APP_NOT_RUNNING",
+          { pid: info.pid, startedAt: info.startedAt, port: info.port, cause: error },
+        );
+        this.serverState = { error: stale };
+        lastError = stale;
+        this.log({
+          level: attempt === MAX_REQUEST_ATTEMPTS - 1 ? "error" : "warn",
+          event: "canvas.session.unreachable",
+          message: stale.message,
+          method: init.method,
+          path: requestPath(path),
+          attempt: attempt + 1,
+          maxAttempts: MAX_REQUEST_ATTEMPTS,
+          willRetry: attempt < MAX_REQUEST_ATTEMPTS - 1,
+          session: sessionSummary(info),
+        });
+      }
     }
-    return response;
+
+    this.log({
+      level: "error",
+      event: "canvas.request.failed",
+      message: "Canvas API request failed after session refresh retries",
+      method: init.method,
+      path: requestPath(path),
+      attempts: MAX_REQUEST_ATTEMPTS,
+      reason: errorSummary(lastError),
+    });
+    throw lastError;
   }
 
   private async fetchOnce(
