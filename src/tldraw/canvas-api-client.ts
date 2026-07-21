@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
@@ -56,6 +57,14 @@ export type JsonValue =
 const MAX_REQUEST_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 100;
 const MAX_RETRY_DELAY_MS = 2_000;
+const STATIC_CACHE_TTL_MS = 5 * 60_000;
+const STATIC_CACHE_MAX_ENTRIES = 64;
+
+interface StaticCacheEntry {
+  sessionKey: string;
+  expiresAt: number;
+  value: unknown;
+}
 
 function mergedSignal(
   signal: AbortSignal | undefined,
@@ -115,6 +124,12 @@ function retryDelayMs(retry: number): number {
   return Math.floor(ceiling / 2 + Math.random() * (ceiling / 2));
 }
 
+function serverSessionKey(info: TldrawServerInfo): string {
+  return createHash("sha256")
+    .update(JSON.stringify([info.port, info.pid ?? null, info.startedAt ?? null, info.token]))
+    .digest("base64url");
+}
+
 function sessionSummary(info: TldrawServerInfo | undefined): Record<string, unknown> | null {
   if (!info) return null;
   return { port: info.port, pid: info.pid, startedAt: info.startedAt };
@@ -134,6 +149,7 @@ function requestPath(path: string): string {
 export class CanvasApiClient {
   private serverState: ServerState;
   private lastKnownServerInfo: TldrawServerInfo | undefined;
+  private readonly staticCache = new Map<string, StaticCacheEntry>();
 
   constructor(
     private readonly config: AppConfig,
@@ -156,6 +172,40 @@ export class CanvasApiClient {
     return this.serverState.info;
   }
 
+  /**
+   * Return an opaque identity for the current per-launch Canvas API session.
+   * Unlike normal requests, this re-reads server.json so caches cannot survive an app restart.
+   */
+  async sessionKey(): Promise<string> {
+    let text: string;
+    try {
+      text = await readFile(this.config.tldrawServerJson, "utf8");
+    } catch (error) {
+      const unavailable = serverFileNotFound(error);
+      this.serverState = { error: unavailable };
+      this.staticCache.clear();
+      throw unavailable;
+    }
+
+    let info: TldrawServerInfo;
+    try {
+      info = parseServerInfo(text);
+    } catch (error) {
+      this.serverState = { error: error as TldrawMcpError };
+      this.staticCache.clear();
+      throw error;
+    }
+    const previous = this.lastKnownServerInfo;
+    const changed = !previous || serverSessionKey(previous) !== serverSessionKey(info);
+    this.serverState = { info };
+    this.lastKnownServerInfo = info;
+    if (changed) {
+      this.staticCache.clear();
+      this.logSessionRefresh(previous, info);
+    }
+    return serverSessionKey(info);
+  }
+
   async readiness(signal?: AbortSignal): Promise<{
     running: true;
     pid?: number;
@@ -172,7 +222,13 @@ export class CanvasApiClient {
   }
 
   async readme(signal?: AbortSignal): Promise<string> {
-    return (await this.requestText("/readme", { method: "GET", signal })).text;
+    return this.cachedStatic("readme", signal, async () =>
+      (await this.requestText("/readme", { method: "GET", signal })).text
+    );
+  }
+
+  async staticSearch<T = unknown>(cacheKey: string, code: string, signal?: AbortSignal): Promise<T> {
+    return this.cachedStatic(`search:${cacheKey}`, signal, async () => this.search<T>(code, signal));
   }
 
   async search<T = unknown>(code: string, signal?: AbortSignal): Promise<T> {
@@ -313,17 +369,8 @@ export class CanvasApiClient {
       const info = parseServerInfo(text);
       this.serverState = { info };
       this.lastKnownServerInfo = info;
-      this.log({
-        level: "info",
-        event: "canvas.session.refreshed",
-        message: "Refreshed the Canvas API session from server.json",
-        previousSession: sessionSummary(previous),
-        currentSession: sessionSummary(info),
-        portChanged: previous ? previous.port !== info.port : undefined,
-        pidChanged: previous ? previous.pid !== info.pid : undefined,
-        startedAtChanged: previous ? previous.startedAt !== info.startedAt : undefined,
-        tokenChanged: previous ? previous.token !== info.token : undefined,
-      });
+      this.staticCache.clear();
+      this.logSessionRefresh(previous, info);
       return info;
     } catch (error) {
       const invalid = error as TldrawMcpError;
@@ -336,6 +383,43 @@ export class CanvasApiClient {
       });
       throw error;
     }
+  }
+
+  private logSessionRefresh(previous: TldrawServerInfo | undefined, info: TldrawServerInfo): void {
+    this.log({
+      level: "info",
+      event: "canvas.session.refreshed",
+      message: "Refreshed the Canvas API session from server.json",
+      previousSession: sessionSummary(previous),
+      currentSession: sessionSummary(info),
+      portChanged: previous ? previous.port !== info.port : undefined,
+      pidChanged: previous ? previous.pid !== info.pid : undefined,
+      startedAtChanged: previous ? previous.startedAt !== info.startedAt : undefined,
+      tokenChanged: previous ? previous.token !== info.token : undefined,
+    });
+  }
+
+  private async cachedStatic<T>(key: string, signal: AbortSignal | undefined, load: () => Promise<T>): Promise<T> {
+    const sessionKey = await this.sessionKey();
+    const cached = this.staticCache.get(key);
+    if (cached && cached.sessionKey === sessionKey && cached.expiresAt > Date.now()) {
+      this.staticCache.delete(key);
+      this.staticCache.set(key, cached);
+      return cached.value as T;
+    }
+    if (cached) this.staticCache.delete(key);
+
+    const value = await load();
+    const currentSessionKey = serverSessionKey(await this.serverInfo());
+    if (!signal?.aborted && currentSessionKey === sessionKey) {
+      while (this.staticCache.size >= STATIC_CACHE_MAX_ENTRIES) {
+        const oldest = this.staticCache.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        this.staticCache.delete(oldest);
+      }
+      this.staticCache.set(key, { sessionKey, expiresAt: Date.now() + STATIC_CACHE_TTL_MS, value });
+    }
+    return value;
   }
 
   private async fetchWithRetry(

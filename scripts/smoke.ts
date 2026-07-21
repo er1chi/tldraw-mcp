@@ -14,8 +14,8 @@ try {
   await client.connect(transport)
   const tools = await client.listTools()
   const health = await client.callTool({ name: 'tldraw_health', arguments: {} })
-  const focused = await client.callTool({ name: 'tldraw_doc_focused', arguments: {} })
-  console.log(JSON.stringify({ url, toolCount: tools.tools.length, health: health.structuredContent, focused: focused.structuredContent }, null, 2))
+  const inspected = await client.callTool({ name: 'tldraw_doc_inspect', arguments: { detail: 'summary', limit: 10 } })
+  console.log(JSON.stringify({ url, toolCount: tools.tools.length, health: health.content, inspected: inspected.content }, null, 2))
 } finally {
   await client.close()
 }

@@ -10,24 +10,23 @@ Use the `tldraw_*` MCP tools supplied by the `tldraw-offline` server. If they ar
 ## Workflow
 
 1. Restate the intended result in concrete canvas terms.
-2. Find the target with `tldraw_doc_focused` or `tldraw_docs_list`.
-3. Inspect current records with `tldraw_doc_shapes`; inspect bindings only when connection behavior matters.
-4. Choose durability:
+2. Call `tldraw_doc_inspect` without a document id to select and inspect the focused document in one request. Use `tldraw_docs_list` first only when choosing by filename; request bindings only when connection behavior matters.
+3. Choose durability:
    - static drawing changes use `tldraw_exec`;
    - persistent behavior uses `tldraw_workspace_open/read/apply`.
-5. For durable behavior, read the matching recipe with `tldraw_recipe_get` before implementation.
-6. Verify once with shapes, bindings, script status, or an inline screenshot.
-7. Run `tldraw_lint` before reporting a diagram complete.
-8. Stop after one successful verification unless debugging was requested.
+4. For durable behavior, read the matching recipe with `tldraw_recipe_get` before implementation.
+5. Verify once with `tldraw_doc_inspect`, script status, or an inline screenshot.
+6. Run `tldraw_lint` before reporting a diagram complete.
+7. Stop after one successful verification unless debugging was requested.
 
 ## Rules
 
 - Import SDK primitives inside exec with `await import('tldraw')`; document scripts may use top-level imports.
 - Create semantic arrows with `helpers.createArrowBetweenShapes`; never substitute an unbound raw arrow.
-- Return small JSON-serializable values from exec.
+- Return JSON-serializable values normally from search and exec; results arrive as JSON text, so never throw an error merely to surface data. Document records use `id` with `api.getShapes(id)` and `api.getBindings(id)`.
 - Read and retain the SHA of every existing durable file before editing it.
 - Extend non-default scripts; never clobber them.
-- Treat script status `applied` as success, `pending` as incomplete, and `error` as failure. Check status once after a write and read `tldraw_script_error_log` on failure.
+- Treat the status returned by `tldraw_workspace_apply` as authoritative: `applied` is success, `pending` is incomplete after its bounded wait, and `error` is failure. Call `tldraw_script_status` only if apply remains pending; read `tldraw_script_error_log` on failure.
 - Use only virtual `script/**` and `assets/**` paths. Never attempt to access archives, databases, metadata, locks, or Mac absolute paths.
 - Use `tldraw_screenshot` only when visual placement is uncertain, UI chrome must be checked, or the user requests proof. The image is returned inline.
 

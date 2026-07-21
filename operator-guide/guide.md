@@ -7,15 +7,14 @@ Use this server to inspect and control tldraw Desktop running on the Mac.
 - **Static canvas changes**—create, move, style, align, stack, select, or delete shapes—use `tldraw_exec`.
 - **Durable behavior**—click handlers, keyboard behavior, animations, reactive layouts, run-on-open logic, custom shapes, tools, or overlays—use the workspace tools.
 
-Before acting, identify the document with `tldraw_doc_focused` or `tldraw_docs_list`. Inspect existing shapes before mutating them. Verify once after a successful operation and stop unless debugging was requested.
+Before acting, call `tldraw_doc_inspect` without a document id to select and inspect the focused document in one request. Use `tldraw_docs_list` first only when you need to choose by filename. Verify once after a successful operation and stop unless debugging was requested.
 
 ## Static edits
 
-1. Find the document.
-2. Read shapes with `tldraw_doc_shapes`; read bindings only when connection behavior matters.
-3. Call `tldraw_exec` with code that returns a small JSON result.
-4. Verify once with shape records, bindings, or `tldraw_screenshot` when visual placement is uncertain.
-5. Run `tldraw_lint` before reporting a diagram complete.
+1. Call `tldraw_doc_inspect`; omit `documentId` to use the focused document and set `includeBindings` only when connection behavior matters.
+2. Call `tldraw_exec` with code that returns a small JSON result.
+3. Verify once with `tldraw_doc_inspect` or `tldraw_screenshot` when visual placement is uncertain.
+4. Run `tldraw_lint` before reporting a diagram complete.
 
 An exec snippet receives only `editor`, `helpers`, `signal`, and `app` as bare values. Import SDK symbols dynamically:
 
@@ -55,7 +54,7 @@ Read the matching recipe before building durable behavior. Recipe IDs are:
 - `custom-shape-config-js`
 - `custom-overlay-config-js`
 
-`tldraw_search` and `tldraw_exec` are complete escape hatches when a semantic tool is insufficient.
+`tldraw_search` and `tldraw_exec` are complete escape hatches when a semantic tool is insufficient. Return JSON-serializable values normally; tool results are already delivered as JSON text, so never throw an error merely to surface data. Document records use `id` when calling `api.getShapes(id)` or `api.getBindings(id)`.
 
 ## Durable scripts
 

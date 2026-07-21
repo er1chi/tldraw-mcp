@@ -80,9 +80,7 @@ Install `skill/tldraw-offline/SKILL.md` on the Linux agent host. If this reposit
 
 - `tldraw_health`
 - `tldraw_docs_list`
-- `tldraw_doc_focused`
-- `tldraw_doc_shapes`
-- `tldraw_doc_bindings`
+- `tldraw_doc_inspect` — uses the focused document when `documentId` is omitted; optionally includes bindings
 - `tldraw_reference_search`
 - `tldraw_imports_search`
 - `tldraw_helpers_list`

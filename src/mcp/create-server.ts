@@ -25,7 +25,7 @@ export function createMcpServer(services: McpServices): McpServer {
     { name: 'tldraw-offline', version: '0.1.0' },
     {
       instructions:
-        'Control the Mac-hosted tldraw Desktop app. Inspect before mutating. Use tldraw_exec for static edits and workspace tools for durable behavior. Use bound arrows for meaningful connections, run tldraw_lint before completion, and verify once. Never overwrite a non-default script before reading it and retaining its SHA-256.',
+        'Control the Mac-hosted tldraw Desktop app. Inspect before mutating. Use tldraw_exec for static edits and workspace tools for durable behavior. Use bound arrows for meaningful connections, run tldraw_lint before completion, and verify once. Never overwrite a non-default script before reading it and retaining its SHA-256. Tool results are returned as JSON text: return values normally and never throw an error merely to surface data.',
     },
   )
 
@@ -56,40 +56,23 @@ export function createMcpServer(services: McpServices): McpServer {
   )
 
   server.registerTool(
-    'tldraw_doc_focused',
-    { description: 'Return the most recently focused tldraw document, or null.', annotations: readOnly },
-    async (extra) => safely(async () => ok(await canvas.search('return await api.getFocusedDoc()', extra.signal))),
-  )
-
-  server.registerTool(
-    'tldraw_doc_shapes',
+    'tldraw_doc_inspect',
     {
-      description: 'Read current-page metadata, viewport, and raw shape records for one document with pagination.',
+      description:
+        'Select an open document by id or use the focused document, then return current-page metadata, viewport, paginated shapes, and optional bindings.',
       inputSchema: z.object({
-        documentId: z.string().min(1),
+        documentId: z.string().min(1).optional(),
         offset: z.number().int().min(0).default(0),
         limit: z.number().int().min(1).max(5000).default(500),
         detail: z.enum(['full', 'summary']).default('full'),
+        includeBindings: z.boolean().default(false),
+        bindingShapeId: z.string().min(1).optional(),
       }),
       annotations: readOnly,
     },
-    async ({ documentId, offset, limit, detail }, extra) =>
+    async ({ documentId, offset, limit, detail, includeBindings, bindingShapeId }, extra) =>
       safely(async () => {
-        const code = `const data = await api.getShapes(${JSON.stringify(documentId)}); const all = data.shapes ?? []; const page = all.slice(${offset}, ${offset + limit}); return { page: data.page, viewport: data.viewport, total: all.length, offset: ${offset}, limit: ${limit}, shapes: ${detail === 'full' ? 'page' : "page.map(s => ({ id: s.id, type: s.type, x: s.x, y: s.y, rotation: s.rotation, parentId: s.parentId, props: s.props, meta: s.meta }))"} }`
-        return ok(await canvas.search(code, extra.signal))
-      }),
-  )
-
-  server.registerTool(
-    'tldraw_doc_bindings',
-    {
-      description: 'Read raw binding records for a document. Use this to verify meaningful arrows are truly bound.',
-      inputSchema: z.object({ documentId: z.string().min(1), shapeId: z.string().min(1).optional() }),
-      annotations: readOnly,
-    },
-    async ({ documentId, shapeId }, extra) =>
-      safely(async () => {
-        const code = `const bindings = await api.getBindings(${JSON.stringify(documentId)}); return ${shapeId ? `bindings.filter(b => b.fromId === ${JSON.stringify(shapeId)} || b.toId === ${JSON.stringify(shapeId)})` : 'bindings'}`
+        const code = `const docs = await api.getDocs(); const document = ${documentId ? `docs.find(d => d.id === ${JSON.stringify(documentId)})` : 'docs[0]'} ?? null; if (!document) return null; const [data, rawBindings] = await Promise.all([api.getShapes(document.id), ${includeBindings || bindingShapeId ? 'api.getBindings(document.id)' : 'Promise.resolve(null)'}]); const all = data.shapes ?? []; const pageShapes = all.slice(${offset}, ${offset + limit}); const result = { document, page: data.page, viewport: data.viewport, total: all.length, offset: ${offset}, limit: ${limit}, shapes: ${detail === 'full' ? 'pageShapes' : "pageShapes.map(s => ({ id: s.id, type: s.type, x: s.x, y: s.y, rotation: s.rotation, parentId: s.parentId, props: s.props, meta: s.meta }))"} }; if (rawBindings) result.bindings = ${bindingShapeId ? `rawBindings.filter(b => b.fromId === ${JSON.stringify(bindingShapeId)} || b.toId === ${JSON.stringify(bindingShapeId)})` : 'rawBindings'}; return result`
         return ok(await canvas.search(code, extra.signal))
       }),
   )
@@ -110,7 +93,8 @@ export function createMcpServer(services: McpServices): McpServer {
     async ({ query, category, exactName, offset, limit }, extra) =>
       safely(async () => {
         const code = `const q=${JSON.stringify(query.toLowerCase())}, category=${JSON.stringify(category ?? null)}, exact=${JSON.stringify(exactName ?? null)}; const matches=api.members.filter(m => (!exact || m.name === exact) && (!category || m.category === category) && (!q || JSON.stringify(m).toLowerCase().includes(q))); return { memberCount: api.memberCount, categories: api.categories, total: matches.length, offset: ${offset}, members: matches.slice(${offset}, ${offset + limit}) }`
-        return ok(await canvas.search(code, extra.signal))
+        const cacheKey = JSON.stringify({ query, category, exactName, offset, limit })
+        return ok(await canvas.staticSearch(`reference:${cacheKey}`, code, extra.signal))
       }),
   )
 
@@ -124,14 +108,18 @@ export function createMcpServer(services: McpServices): McpServer {
     async ({ query, module, kind, limit }, extra) =>
       safely(async () => {
         const code = `const q=${JSON.stringify(query.toLowerCase())}, mod=${JSON.stringify(module ?? null)}, kind=${JSON.stringify(kind ?? null)}; const modules=api.imports.filter(m => !mod || m.module === mod).map(m => ({...m, exports: (m.exports ?? []).filter(e => (!kind || e.kind === kind) && (!q || e.name.toLowerCase().includes(q))).slice(0, ${limit})})); return { importCount: api.importCount, modules }`
-        return ok(await canvas.search(code, extra.signal))
+        const cacheKey = JSON.stringify({ query, module, kind, limit })
+        return ok(await canvas.staticSearch(`imports:${cacheKey}`, code, extra.signal))
       }),
   )
 
   server.registerTool(
     'tldraw_helpers_list',
     { description: 'Return documentation for all editor-bound helper functions available in exec and scripts.', annotations: readOnly },
-    async (extra) => safely(async () => ok(await canvas.search('return { helperCount: api.helperCount, helpers: api.helpers }', extra.signal))),
+    async (extra) =>
+      safely(async () =>
+        ok(await canvas.staticSearch('helpers', 'return { helperCount: api.helperCount, helpers: api.helpers }', extra.signal)),
+      ),
   )
 
   server.registerTool(
@@ -139,7 +127,13 @@ export function createMcpServer(services: McpServices): McpServer {
     { description: 'List all tldraw operator recipes by id, title, and intended use.', annotations: readOnly },
     async (extra) =>
       safely(async () =>
-        ok(await canvas.search("return Object.values(api.recipes).map(({id,title,whenToUse}) => ({id,title,whenToUse}))", extra.signal)),
+        ok(
+          await canvas.staticSearch(
+            'recipes:list',
+            "return Object.values(api.recipes).map(({id,title,whenToUse}) => ({id,title,whenToUse}))",
+            extra.signal,
+          ),
+        ),
       ),
   )
 
@@ -150,7 +144,10 @@ export function createMcpServer(services: McpServices): McpServer {
       inputSchema: z.object({ id: z.string().min(1) }),
       annotations: readOnly,
     },
-    async ({ id }, extra) => safely(async () => ok(await canvas.search(`return api.recipes[${JSON.stringify(id)}] ?? null`, extra.signal))),
+    async ({ id }, extra) =>
+      safely(async () =>
+        ok(await canvas.staticSearch(`recipe:${id}`, `return api.recipes[${JSON.stringify(id)}] ?? null`, extra.signal)),
+      ),
   )
 
   server.registerTool(
@@ -162,7 +159,8 @@ export function createMcpServer(services: McpServices): McpServer {
   server.registerTool(
     'tldraw_search',
     {
-      description: 'Execute arbitrary JavaScript against the Canvas API `api` object. Top-level await works. Return JSON-serializable data.',
+      description:
+        'Execute arbitrary JavaScript against the Canvas API `api` object. Top-level await works. Return JSON-serializable data normally; never throw an error to surface a result. Document objects from getDocs/getFocusedDoc use their `id` with getShapes/getBindings.',
       inputSchema: z.object({ code: z.string().min(1) }),
       annotations: readOnly,
     },

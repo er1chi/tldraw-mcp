@@ -10,6 +10,7 @@ import { applyExactEdits, WorkspaceService } from '../src/tldraw/workspace-servi
 let root: string
 let workspace: ScriptWorkspaceResult
 let service: WorkspaceService
+let scriptWorkspaceCalls: number
 
 const config: AppConfig = {
   host: '127.0.0.1',
@@ -49,8 +50,13 @@ beforeEach(async () => {
     manifest: null,
     name: 'Test',
   }
+  scriptWorkspaceCalls = 0
   const client = {
-    scriptWorkspace: async () => workspace,
+    sessionKey: async () => 'session:1',
+    scriptWorkspace: async () => {
+      scriptWorkspaceCalls += 1
+      return workspace
+    },
     scriptStatus: async () => ({ state: 'applied' }),
   } as unknown as CanvasApiClient
   service = new WorkspaceService(client, config)
@@ -89,6 +95,13 @@ describe('WorkspaceService', () => {
     expect(result.files.some((file) => file.path === 'script/main.js')).toBe(true)
   })
 
+  test('reuses workspace metadata for reads within the same app session', async () => {
+    await service.open('doc:test')
+    await service.list('doc:test')
+    await service.read('doc:test', 'script/main.js')
+    expect(scriptWorkspaceCalls).toBe(1)
+  })
+
   test('requires and enforces SHA preconditions for existing scripts', async () => {
     const original = await readFile(join(root, 'script/main.js'), 'utf8')
     const hash = createHash('sha256').update(original).digest('hex')
@@ -106,6 +119,23 @@ describe('WorkspaceService', () => {
     await expect(
       service.apply('doc:test', [{ op: 'write_text', path: 'script/main.js', content: 'bad', expectedSha256: hash }]),
     ).rejects.toThrow('SHA-256 conflict')
+  })
+
+  test('waits briefly for a pending script apply to settle', async () => {
+    let statusCalls = 0
+    const client = {
+      sessionKey: async () => 'session:1',
+      scriptWorkspace: async () => workspace,
+      scriptStatus: async () => ({ state: ++statusCalls < 3 ? 'pending' : 'applied' }),
+    } as unknown as CanvasApiClient
+    const waitingService = new WorkspaceService(client, config, { applyWaitMs: 100, applyPollMs: 1 })
+
+    const result = await waitingService.apply('doc:test', [
+      { op: 'write_text', path: 'script/module.js', content: 'export const settled = true\n' },
+    ])
+
+    expect(result.status).toEqual({ state: 'applied' })
+    expect(statusCalls).toBe(3)
   })
 
   test('writes text and binary assets in a batch', async () => {
