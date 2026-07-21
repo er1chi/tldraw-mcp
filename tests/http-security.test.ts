@@ -82,7 +82,7 @@ describe('HTTP security', () => {
         const authorization = request.headers.get('authorization')
         receivedAuthorizations.push(authorization)
         if (authorization !== `Bearer ${canvasToken}`) return new Response('Unauthorized', { status: 401 })
-        return new Response('ok')
+        return Response.json({ success: true, result: true })
       },
     })
 
@@ -92,10 +92,7 @@ describe('HTTP security', () => {
       const response = await readyApp.request('http://localhost/readyz', { headers: authenticatedHeaders })
 
       expect(response.status).toBe(200)
-      expect(await response.json()).toEqual({
-        status: 'ready',
-        app: { running: true, port: upstream.port },
-      })
+      expect(await response.json()).toEqual({ status: 'ready' })
       expect(receivedAuthorizations).toEqual([`Bearer ${canvasToken}`])
     } finally {
       await upstream.stop(true)

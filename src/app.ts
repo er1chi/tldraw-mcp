@@ -25,10 +25,8 @@ export function createApp(config: AppConfig): Hono {
   app.use("/readyz", bearerAuth(config));
   app.get("/readyz", async (c) => {
     try {
-      return c.json({
-        status: "ready",
-        app: await canvas.readiness(c.req.raw.signal),
-      });
+      await canvas.search("return true", c.req.raw.signal);
+      return c.json({ status: "ready" });
     } catch (error) {
       return c.json(
         {

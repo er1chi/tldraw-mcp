@@ -11,7 +11,6 @@ let closeServer: () => Promise<void>
 
 beforeEach(async () => {
   const canvas = {
-    readiness: async () => ({ running: true, port: 7236 }),
     search: async (code: string) =>
       code === 'return { answer: 42 }'
         ? { answer: 42 }

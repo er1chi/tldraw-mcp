@@ -17,11 +17,6 @@ type ServerState =
   | { info: TldrawServerInfo; error?: never }
   | { info?: never; error: TldrawMcpError };
 
-interface FetchResult {
-  response: Response;
-  info: TldrawServerInfo;
-}
-
 interface AppEnvelope<T> {
   success: boolean;
   result?: T;
@@ -206,24 +201,9 @@ export class CanvasApiClient {
     return serverSessionKey(info);
   }
 
-  async readiness(signal?: AbortSignal): Promise<{
-    running: true;
-    pid?: number;
-    startedAt?: number;
-    port: number;
-  }> {
-    const { info } = await this.requestText("/", { method: "GET", signal });
-    return {
-      running: true,
-      pid: info.pid,
-      startedAt: info.startedAt,
-      port: info.port,
-    };
-  }
-
   async readme(signal?: AbortSignal): Promise<string> {
     return this.cachedStatic("readme", signal, async () =>
-      (await this.requestText("/readme", { method: "GET", signal })).text
+      this.requestText("/readme", { method: "GET", signal })
     );
   }
 
@@ -283,7 +263,7 @@ export class CanvasApiClient {
     path: string,
     init: RequestInit,
   ): Promise<T> {
-    const { response } = await this.fetchWithRetry(path, init);
+    const response = await this.fetchWithRetry(path, init);
     const raw = await response.text();
     this.assertSize(raw.length);
 
@@ -311,8 +291,8 @@ export class CanvasApiClient {
   private async requestText(
     path: string,
     init: RequestInit,
-  ): Promise<{ text: string; info: TldrawServerInfo }> {
-    const { response, info } = await this.fetchWithRetry(path, init);
+  ): Promise<string> {
+    const response = await this.fetchWithRetry(path, init);
     const text = await response.text();
     this.assertSize(text.length);
     if (!response.ok)
@@ -321,7 +301,7 @@ export class CanvasApiClient {
         "UPSTREAM_ERROR",
         text,
       );
-    return { text, info };
+    return text;
   }
 
   private assertSize(length: number): void {
@@ -425,7 +405,7 @@ export class CanvasApiClient {
   private async fetchWithRetry(
     path: string,
     init: RequestInit,
-  ): Promise<FetchResult> {
+  ): Promise<Response> {
     let lastError: unknown;
 
     for (let attempt = 0; attempt < MAX_REQUEST_ATTEMPTS; attempt += 1) {
@@ -475,7 +455,7 @@ export class CanvasApiClient {
               session: sessionSummary(info),
             });
           }
-          return { response, info };
+          return response;
         }
 
         const unauthorized = new TldrawMcpError(
@@ -495,7 +475,7 @@ export class CanvasApiClient {
           willRetry: attempt < MAX_REQUEST_ATTEMPTS - 1,
           session: sessionSummary(info),
         });
-        if (attempt === MAX_REQUEST_ATTEMPTS - 1) return { response, info };
+        if (attempt === MAX_REQUEST_ATTEMPTS - 1) return response;
         await response.body?.cancel();
       } catch (error) {
         if (init.signal?.aborted) throw error;

@@ -65,7 +65,7 @@ describe('CanvasApiClient server sessions', () => {
       port: 0,
       fetch(request) {
         authorizations.push(request.headers.get('authorization'))
-        return new Response('ok')
+        return Response.json({ success: true, result: true })
       },
     })
     const upstreamPort = upstream.port
@@ -76,8 +76,8 @@ describe('CanvasApiClient server sessions', () => {
       const client = new CanvasApiClient(config(serverJson), () => {})
       await writeFile(serverJson, JSON.stringify({ port: upstreamPort, token: 'token-that-must-not-be-read' }))
 
-      await expect(client.readiness()).resolves.toEqual({ running: true, port: upstreamPort, pid: 10, startedAt: 20 })
-      await expect(client.readiness()).resolves.toEqual({ running: true, port: upstreamPort, pid: 10, startedAt: 20 })
+      await expect(client.search('return true')).resolves.toBe(true)
+      await expect(client.search('return true')).resolves.toBe(true)
       expect(authorizations).toEqual([`Bearer ${token}`, `Bearer ${token}`])
     } finally {
       await upstream.stop(true)
@@ -97,7 +97,9 @@ describe('CanvasApiClient server sessions', () => {
       fetch(request) {
         const authorization = request.headers.get('authorization')
         authorizations.push(authorization)
-        return authorization === `Bearer ${newToken}` ? new Response('ok') : new Response('Unauthorized', { status: 401 })
+        return authorization === `Bearer ${newToken}`
+          ? Response.json({ success: true, result: true })
+          : new Response('Unauthorized', { status: 401 })
       },
     })
     const upstreamPort = upstream.port
@@ -109,7 +111,7 @@ describe('CanvasApiClient server sessions', () => {
       const client = new CanvasApiClient(config(serverJson), (entry) => logs.push(entry))
       await writeFile(serverJson, JSON.stringify({ port: upstreamPort, token: newToken, pid: 11, startedAt: 21 }))
 
-      await expect(client.readiness()).resolves.toEqual({ running: true, port: upstreamPort, pid: 11, startedAt: 21 })
+      await expect(client.search('return true')).resolves.toBe(true)
       expect(authorizations).toEqual([`Bearer ${oldToken}`, `Bearer ${newToken}`])
       expect(logs.find((entry) => entry.event === 'canvas.request.unauthorized')).toMatchObject({
         status: 401,
@@ -140,7 +142,7 @@ describe('CanvasApiClient server sessions', () => {
       port: 0,
       fetch(request) {
         authorizations.push(request.headers.get('authorization'))
-        return new Response('ok')
+        return Response.json({ success: true, result: true })
       },
     })
     const stalePort = stale.port
@@ -154,7 +156,7 @@ describe('CanvasApiClient server sessions', () => {
       await writeFile(serverJson, JSON.stringify({ port: upstreamPort, token: newToken, pid: 11, startedAt: 21 }))
       await stale.stop(true)
 
-      await expect(client.readiness()).resolves.toEqual({ running: true, port: upstreamPort, pid: 11, startedAt: 21 })
+      await expect(client.search('return true')).resolves.toBe(true)
       expect(authorizations).toEqual([`Bearer ${newToken}`])
       expect(logs.find((entry) => entry.event === 'canvas.session.unreachable')).toMatchObject({ willRetry: true })
       expect(logs.find((entry) => entry.event === 'canvas.session.refreshed')).toMatchObject({
@@ -184,7 +186,7 @@ describe('CanvasApiClient server sessions', () => {
       const client = new CanvasApiClient(config(serverJson), () => {})
       await stale.stop(true)
 
-      await expect(client.readiness()).rejects.toMatchObject({
+      await expect(client.search('return true')).rejects.toMatchObject({
         code: 'APP_NOT_RUNNING',
         message: 'tldraw is not running: the server.json session is stale',
       })

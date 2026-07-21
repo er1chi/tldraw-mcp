@@ -35,9 +35,8 @@ export function createMcpServer(services: McpServices): McpServer {
     async (_extra) =>
       safely(async () => {
         try {
-          const app = await canvas.readiness(_extra.signal)
           const docs = await canvas.search<unknown[]>('return await api.getDocs()', _extra.signal)
-          return ok({ running: true, app, openDocumentCount: docs.length })
+          return ok({ running: true, openDocumentCount: docs.length })
         } catch (error) {
           return ok({ running: false, reason: error instanceof Error ? error.message : String(error) })
         }
