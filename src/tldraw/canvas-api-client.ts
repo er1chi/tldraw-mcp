@@ -113,11 +113,20 @@ function retryDelayMs(retry: number): number {
 
 function serverSessionKey(info: TldrawServerInfo): string {
   return createHash("sha256")
-    .update(JSON.stringify([info.port, info.pid ?? null, info.startedAt ?? null, info.token]))
+    .update(
+      JSON.stringify([
+        info.port,
+        info.pid ?? null,
+        info.startedAt ?? null,
+        info.token,
+      ]),
+    )
     .digest("base64url");
 }
 
-function sessionSummary(info: TldrawServerInfo | undefined): Record<string, unknown> | null {
+function sessionSummary(
+  info: TldrawServerInfo | undefined,
+): Record<string, unknown> | null {
   if (!info) return null;
   return { port: info.port, pid: info.pid, startedAt: info.startedAt };
 }
@@ -180,7 +189,8 @@ export class CanvasApiClient {
       throw error;
     }
     const previous = this.lastKnownServerInfo;
-    const changed = !previous || serverSessionKey(previous) !== serverSessionKey(info);
+    const changed =
+      !previous || serverSessionKey(previous) !== serverSessionKey(info);
     this.serverState = { info };
     this.lastKnownServerInfo = info;
     if (changed) this.logSessionRefresh(previous, info);
@@ -268,10 +278,7 @@ export class CanvasApiClient {
     return payload.result as T;
   }
 
-  private async requestText(
-    path: string,
-    init: RequestInit,
-  ): Promise<string> {
+  private async requestText(path: string, init: RequestInit): Promise<string> {
     const response = await this.fetchWithRetry(path, init);
     const text = await response.text();
     this.assertSize(text.length);
@@ -344,7 +351,10 @@ export class CanvasApiClient {
     }
   }
 
-  private logSessionRefresh(previous: TldrawServerInfo | undefined, info: TldrawServerInfo): void {
+  private logSessionRefresh(
+    previous: TldrawServerInfo | undefined,
+    info: TldrawServerInfo,
+  ): void {
     this.log({
       level: "info",
       event: "canvas.session.refreshed",
@@ -353,7 +363,9 @@ export class CanvasApiClient {
       currentSession: sessionSummary(info),
       portChanged: previous ? previous.port !== info.port : undefined,
       pidChanged: previous ? previous.pid !== info.pid : undefined,
-      startedAtChanged: previous ? previous.startedAt !== info.startedAt : undefined,
+      startedAtChanged: previous
+        ? previous.startedAt !== info.startedAt
+        : undefined,
       tokenChanged: previous ? previous.token !== info.token : undefined,
     });
   }
@@ -370,7 +382,8 @@ export class CanvasApiClient {
         this.log({
           level: "warn",
           event: "canvas.request.retry",
-          message: "Retrying the Canvas API request after refreshing server.json",
+          message:
+            "Retrying the Canvas API request after refreshing server.json",
           method: init.method,
           path: requestPath(path),
           attempt: attempt + 1,
@@ -438,7 +451,12 @@ export class CanvasApiClient {
         const stale = new TldrawMcpError(
           "tldraw is not running: the server.json session is stale",
           "APP_NOT_RUNNING",
-          { pid: info.pid, startedAt: info.startedAt, port: info.port, cause: error },
+          {
+            pid: info.pid,
+            startedAt: info.startedAt,
+            port: info.port,
+            cause: error,
+          },
         );
         this.serverState = { error: stale };
         lastError = stale;
