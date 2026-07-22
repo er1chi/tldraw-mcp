@@ -52,7 +52,6 @@ beforeEach(async () => {
   }
   scriptWorkspaceCalls = 0
   const client = {
-    sessionKey: async () => 'session:1',
     scriptWorkspace: async () => {
       scriptWorkspaceCalls += 1
       return workspace
@@ -95,11 +94,16 @@ describe('WorkspaceService', () => {
     expect(result.files.some((file) => file.path === 'script/main.js')).toBe(true)
   })
 
-  test('reuses workspace metadata for reads within the same app session', async () => {
-    await service.open('doc:test')
+  test('reads fresh workspace metadata for every operation', async () => {
+    const initial = await service.open('doc:test')
+    workspace = { ...workspace, isDefaultScript: true, name: 'Updated' }
+    const updated = await service.open('doc:test')
     await service.list('doc:test')
     await service.read('doc:test', 'script/main.js')
-    expect(scriptWorkspaceCalls).toBe(1)
+
+    expect(initial).toMatchObject({ isDefaultScript: false, name: 'Test' })
+    expect(updated).toMatchObject({ isDefaultScript: true, name: 'Updated' })
+    expect(scriptWorkspaceCalls).toBe(4)
   })
 
   test('requires and enforces SHA preconditions for existing scripts', async () => {
@@ -124,7 +128,6 @@ describe('WorkspaceService', () => {
   test('waits briefly for a pending script apply to settle', async () => {
     let statusCalls = 0
     const client = {
-      sessionKey: async () => 'session:1',
       scriptWorkspace: async () => workspace,
       scriptStatus: async () => ({ state: ++statusCalls < 3 ? 'pending' : 'applied' }),
     } as unknown as CanvasApiClient

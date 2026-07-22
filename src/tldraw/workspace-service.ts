@@ -42,15 +42,8 @@ interface PreparedDelete {
 }
 
 const TEXT_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.json', '.txt', '.md', '.css', '.svg', '.html', '.csv'])
-const WORKSPACE_CACHE_TTL_MS = 30_000
 const DEFAULT_APPLY_WAIT_MS = 1_500
 const DEFAULT_APPLY_POLL_MS = 75
-
-interface WorkspaceCacheEntry {
-  sessionKey: string
-  expiresAt: number
-  workspace: ScriptWorkspaceResult
-}
 
 export interface WorkspaceServiceOptions {
   applyWaitMs?: number
@@ -58,7 +51,6 @@ export interface WorkspaceServiceOptions {
 }
 
 export class WorkspaceService {
-  private readonly workspaceCache = new Map<string, WorkspaceCacheEntry>()
   private readonly applyWaitMs: number
   private readonly applyPollMs: number
 
@@ -78,7 +70,7 @@ export class WorkspaceService {
     files: WorkspaceFile[]
     virtualPaths: Record<string, string>
   }> {
-    const workspace = await this.getWorkspace(documentId, signal)
+    const workspace = await this.client.scriptWorkspace(documentId, signal)
     return {
       documentId,
       name: workspace.name,
@@ -97,7 +89,7 @@ export class WorkspaceService {
   }
 
   async list(documentId: string, signal?: AbortSignal): Promise<WorkspaceFile[]> {
-    return this.listFromWorkspace(await this.getWorkspace(documentId, signal))
+    return this.listFromWorkspace(await this.client.scriptWorkspace(documentId, signal))
   }
 
   async read(
@@ -106,7 +98,7 @@ export class WorkspaceService {
     options: { encoding?: 'utf8' | 'base64'; offset?: number; limit?: number } = {},
     signal?: AbortSignal,
   ): Promise<{ path: string; encoding: 'utf8' | 'base64'; content: string; size: number; sha256: string; truncated: boolean }> {
-    const workspace = await this.getWorkspace(documentId, signal)
+    const workspace = await this.client.scriptWorkspace(documentId, signal)
     const target = await this.resolvePath(workspace, virtualPath, false)
     const bytes = new Uint8Array(await readFile(target.absolutePath))
     if (bytes.byteLength > this.config.maxFileBytes) {
@@ -157,8 +149,8 @@ export class WorkspaceService {
     if (changes.length === 0) throw new TldrawMcpError('At least one change is required', 'NO_CHANGES')
     if (changes.length > 100) throw new TldrawMcpError('A batch may contain at most 100 changes', 'TOO_MANY_CHANGES')
 
-    // Refresh before a mutation so isDefaultScript and its relaxed initial-write precondition are current.
-    const workspace = await this.getWorkspace(documentId, signal, true)
+    // Fetch immediately before mutation so paths, permissions, and initial-write rules are current.
+    const workspace = await this.client.scriptWorkspace(documentId, signal)
     const paths = new Set<string>()
     const writes: PreparedWrite[] = []
     const deletes: PreparedDelete[] = []
@@ -224,28 +216,11 @@ export class WorkspaceService {
       ...deletes.map((item) => ({ path: item.target.virtualPath, op: item.operation.op, beforeSha256: item.beforeSha256, sha256: null })),
     ]
 
-    // Script writes can change isDefaultScript and a renderer restart can replace workspace paths.
-    this.workspaceCache.delete(documentId)
     return { changed, status: await this.waitForApply(documentId, signal) }
   }
 
   async status(documentId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return sanitizeStatus(await this.client.scriptStatus<Record<string, unknown>>(documentId, signal))
-  }
-
-  private async getWorkspace(documentId: string, signal?: AbortSignal, force = false): Promise<ScriptWorkspaceResult> {
-    const sessionKey = await this.client.sessionKey()
-    const cached = this.workspaceCache.get(documentId)
-    if (!force && cached && cached.sessionKey === sessionKey && cached.expiresAt > Date.now()) return cached.workspace
-
-    const workspace = await this.client.scriptWorkspace(documentId, signal)
-    const currentSessionKey = await this.client.sessionKey()
-    this.workspaceCache.set(documentId, {
-      sessionKey: currentSessionKey,
-      expiresAt: Date.now() + WORKSPACE_CACHE_TTL_MS,
-      workspace,
-    })
-    return workspace
   }
 
   private async waitForApply(documentId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
