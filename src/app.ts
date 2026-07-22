@@ -5,16 +5,18 @@ import { requestLogger } from "./logging/http-logger.ts";
 import { createMcpServer } from "./mcp/create-server.ts";
 import { bearerAuth, securityMiddleware } from "./security/http-security.ts";
 import { CanvasApiClient } from "./tldraw/canvas-api-client.ts";
+import { DocumentInspectionService } from "./tldraw/document-inspection-service.ts";
 import { ScreenshotService } from "./tldraw/screenshot-service.ts";
 import { StaticMaterialService } from "./tldraw/static-material-service.ts";
 import { WorkspaceService } from "./tldraw/workspace-service.ts";
 
 export function createApp(config: AppConfig): Hono {
   const canvas = new CanvasApiClient(config);
+  const documents = new DocumentInspectionService(canvas);
   const workspace = new WorkspaceService(canvas, config);
   const screenshots = new ScreenshotService(canvas, config);
   const staticMaterial = new StaticMaterialService(canvas);
-  const services = { canvas, workspace, screenshots, staticMaterial };
+  const services = { canvas, documents, workspace, screenshots, staticMaterial };
 
   const app = new Hono();
   app.use("*", requestLogger());

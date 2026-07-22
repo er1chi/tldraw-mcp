@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import type { CanvasApiClient } from '../tldraw/canvas-api-client.ts'
+import type { DocumentInspector } from '../tldraw/document-inspection-service.ts'
 import type { ScreenshotService } from '../tldraw/screenshot-service.ts'
 import type { StaticMaterialService } from '../tldraw/static-material-service.ts'
 import type { WorkspaceChange, WorkspaceService } from '../tldraw/workspace-service.ts'
@@ -12,17 +13,21 @@ const GUIDE_PATH = resolve(import.meta.dir, '../../operator-guide/guide.md')
 const GUIDE = readFileSync(GUIDE_PATH, 'utf8')
 
 export interface McpServices {
-  canvas: CanvasApiClient
-  workspace: WorkspaceService
-  screenshots: ScreenshotService
-  staticMaterial: StaticMaterialService
+  canvas: Pick<CanvasApiClient, 'search' | 'exec'>
+  documents: DocumentInspector
+  workspace: Pick<WorkspaceService, 'open' | 'list' | 'read' | 'apply' | 'status' | 'errorLog'>
+  screenshots: Pick<ScreenshotService, 'capture'>
+  staticMaterial: Pick<
+    StaticMaterialService,
+    'referenceSearch' | 'importsSearch' | 'helpers' | 'recipesList' | 'recipe' | 'readme'
+  >
 }
 
 const readOnly = { readOnlyHint: true } as const
 const mutating = { readOnlyHint: false, destructiveHint: true } as const
 
 export function createMcpServer(services: McpServices): McpServer {
-  const { canvas, workspace, screenshots, staticMaterial } = services
+  const { canvas, documents, workspace, screenshots, staticMaterial } = services
   const server = new McpServer(
     { name: 'tldraw-offline', version: '0.1.0' },
     {
@@ -72,10 +77,14 @@ export function createMcpServer(services: McpServices): McpServer {
       annotations: readOnly,
     },
     async ({ documentId, offset, limit, detail, includeBindings, bindingShapeId }, extra) =>
-      safely(async () => {
-        const code = `const docs = await api.getDocs(); const document = ${documentId ? `docs.find(d => d.id === ${JSON.stringify(documentId)})` : 'docs[0]'} ?? null; if (!document) return null; const [data, rawBindings] = await Promise.all([api.getShapes(document.id), ${includeBindings || bindingShapeId ? 'api.getBindings(document.id)' : 'Promise.resolve(null)'}]); const all = data.shapes ?? []; const pageShapes = all.slice(${offset}, ${offset + limit}); const result = { document, page: data.page, viewport: data.viewport, total: all.length, offset: ${offset}, limit: ${limit}, shapes: ${detail === 'full' ? 'pageShapes' : "pageShapes.map(s => ({ id: s.id, type: s.type, x: s.x, y: s.y, rotation: s.rotation, parentId: s.parentId, props: s.props, meta: s.meta }))"} }; if (rawBindings) result.bindings = ${bindingShapeId ? `rawBindings.filter(b => b.fromId === ${JSON.stringify(bindingShapeId)} || b.toId === ${JSON.stringify(bindingShapeId)})` : 'rawBindings'}; return result`
-        return ok(await canvas.search(code, extra.signal))
-      }),
+      safely(async () =>
+        ok(
+          await documents.inspect(
+            { documentId, offset, limit, detail, includeBindings, bindingShapeId },
+            extra.signal,
+          ),
+        ),
+      ),
   )
 
   server.registerTool(

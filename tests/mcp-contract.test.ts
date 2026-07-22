@@ -1,33 +1,56 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { createMcpServer } from '../src/mcp/create-server.ts'
-import type { CanvasApiClient } from '../src/tldraw/canvas-api-client.ts'
-import type { ScreenshotService } from '../src/tldraw/screenshot-service.ts'
-import type { StaticMaterialService } from '../src/tldraw/static-material-service.ts'
-import type { WorkspaceService } from '../src/tldraw/workspace-service.ts'
+import { createMcpServer, type McpServices } from '../src/mcp/create-server.ts'
 
 let client: Client
 let closeServer: () => Promise<void>
 
 beforeEach(async () => {
-  const canvas = {
-    search: async (code: string) =>
-      code === 'return { answer: 42 }'
-        ? { answer: 42 }
-        : code.includes('getShapes')
-          ? { document: { id: 'doc:test', name: 'Test' }, total: 1, shapes: [{ id: 'shape:test', type: 'geo' }] }
-          : code.includes('getDocs')
-            ? [{ id: 'doc:test' }]
-            : null,
-  } as unknown as CanvasApiClient
-  const workspace = {} as WorkspaceService
-  const screenshots = {
-    capture: async () => ({ data: Buffer.from('jpeg').toString('base64'), mimeType: 'image/jpeg', metadata: { width: 1, height: 1 } }),
-  } as unknown as ScreenshotService
-  const staticMaterial = {} as StaticMaterialService
+  const unused = async (): Promise<never> => {
+    throw new Error('Unexpected service call')
+  }
+  const canvas: McpServices['canvas'] = {
+    async search<T>(code: string): Promise<T> {
+      if (code !== 'return { answer: 42 }') throw new Error(`Unexpected search: ${code}`)
+      return { answer: 42 } as T
+    },
+    exec: unused,
+  }
+  const documents: McpServices['documents'] = {
+    inspect: async (options) => ({
+      document: { id: 'doc:test', name: 'Test' },
+      total: 1,
+      offset: options.offset,
+      limit: options.limit,
+      shapes: [{ id: 'shape:test', type: 'geo' }],
+    }),
+  }
+  const workspace: McpServices['workspace'] = {
+    open: unused,
+    list: unused,
+    read: unused,
+    apply: unused,
+    status: unused,
+    errorLog: unused,
+  }
+  const screenshots: McpServices['screenshots'] = {
+    capture: async () => ({
+      data: Buffer.from('jpeg').toString('base64'),
+      mimeType: 'image/jpeg',
+      metadata: { width: 1, height: 1, bytes: 4 },
+    }),
+  }
+  const staticMaterial: McpServices['staticMaterial'] = {
+    referenceSearch: unused,
+    importsSearch: unused,
+    helpers: unused,
+    recipesList: unused,
+    recipe: unused,
+    readme: unused,
+  }
 
-  const server = createMcpServer({ canvas, workspace, screenshots, staticMaterial })
+  const server = createMcpServer({ canvas, documents, workspace, screenshots, staticMaterial })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
   client = new Client({ name: 'test-client', version: '1.0.0' })
@@ -64,6 +87,8 @@ describe('MCP contract', () => {
     expect(JSON.parse(text)).toEqual({
       document: { id: 'doc:test', name: 'Test' },
       total: 1,
+      offset: 0,
+      limit: 500,
       shapes: [{ id: 'shape:test', type: 'geo' }],
     })
     expect(text.match(/shape:test/g)).toHaveLength(1)
