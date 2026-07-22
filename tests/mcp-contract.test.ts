@@ -4,6 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { createMcpServer } from '../src/mcp/create-server.ts'
 import type { CanvasApiClient } from '../src/tldraw/canvas-api-client.ts'
 import type { ScreenshotService } from '../src/tldraw/screenshot-service.ts'
+import type { StaticMaterialService } from '../src/tldraw/static-material-service.ts'
 import type { WorkspaceService } from '../src/tldraw/workspace-service.ts'
 
 let client: Client
@@ -24,8 +25,9 @@ beforeEach(async () => {
   const screenshots = {
     capture: async () => ({ data: Buffer.from('jpeg').toString('base64'), mimeType: 'image/jpeg', metadata: { width: 1, height: 1 } }),
   } as unknown as ScreenshotService
+  const staticMaterial = {} as StaticMaterialService
 
-  const server = createMcpServer({ canvas, workspace, screenshots })
+  const server = createMcpServer({ canvas, workspace, screenshots, staticMaterial })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
   client = new Client({ name: 'test-client', version: '1.0.0' })

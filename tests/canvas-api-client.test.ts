@@ -22,39 +22,6 @@ function config(tldrawServerJson: string): AppConfig {
 }
 
 describe('CanvasApiClient server sessions', () => {
-  test('caches static search material and invalidates it when the app session changes', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'canvas-api-client-test-'))
-    const serverJson = join(directory, 'server.json')
-    const token = 'static-cache-token'
-    let requests = 0
-    const upstream = Bun.serve({
-      hostname: '127.0.0.1',
-      port: 0,
-      fetch() {
-        requests += 1
-        return Response.json({ success: true, result: { requests } })
-      },
-    })
-    const upstreamPort = upstream.port
-    if (upstreamPort === undefined) throw new Error('Test server did not bind a port')
-
-    try {
-      await writeFile(serverJson, JSON.stringify({ port: upstreamPort, token, pid: 10, startedAt: 20 }))
-      const client = new CanvasApiClient(config(serverJson), () => {})
-
-      await expect(client.staticSearch('helpers', 'return api.helpers')).resolves.toEqual({ requests: 1 })
-      await expect(client.staticSearch('helpers', 'return api.helpers')).resolves.toEqual({ requests: 1 })
-      expect(requests).toBe(1)
-
-      await writeFile(serverJson, JSON.stringify({ port: upstreamPort, token, pid: 11, startedAt: 21 }))
-      await expect(client.staticSearch('helpers', 'return api.helpers')).resolves.toEqual({ requests: 2 })
-      expect(requests).toBe(2)
-    } finally {
-      await upstream.stop(true)
-      await rm(directory, { recursive: true, force: true })
-    }
-  })
-
   test('uses the server session loaded at initialization for successful requests', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'canvas-api-client-test-'))
     const serverJson = join(directory, 'server.json')

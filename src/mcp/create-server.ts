@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import type { CanvasApiClient } from '../tldraw/canvas-api-client.ts'
 import type { ScreenshotService } from '../tldraw/screenshot-service.ts'
+import type { StaticMaterialService } from '../tldraw/static-material-service.ts'
 import type { WorkspaceChange, WorkspaceService } from '../tldraw/workspace-service.ts'
 import { image, ok, safely } from './results.ts'
 
@@ -14,13 +15,14 @@ export interface McpServices {
   canvas: CanvasApiClient
   workspace: WorkspaceService
   screenshots: ScreenshotService
+  staticMaterial: StaticMaterialService
 }
 
 const readOnly = { readOnlyHint: true } as const
 const mutating = { readOnlyHint: false, destructiveHint: true } as const
 
 export function createMcpServer(services: McpServices): McpServer {
-  const { canvas, workspace, screenshots } = services
+  const { canvas, workspace, screenshots, staticMaterial } = services
   const server = new McpServer(
     { name: 'tldraw-offline', version: '0.1.0' },
     {
@@ -90,11 +92,9 @@ export function createMcpServer(services: McpServices): McpServer {
       annotations: readOnly,
     },
     async ({ query, category, exactName, offset, limit }, extra) =>
-      safely(async () => {
-        const code = `const q=${JSON.stringify(query.toLowerCase())}, category=${JSON.stringify(category ?? null)}, exact=${JSON.stringify(exactName ?? null)}; const matches=api.members.filter(m => (!exact || m.name === exact) && (!category || m.category === category) && (!q || JSON.stringify(m).toLowerCase().includes(q))); return { memberCount: api.memberCount, categories: api.categories, total: matches.length, offset: ${offset}, members: matches.slice(${offset}, ${offset + limit}) }`
-        const cacheKey = JSON.stringify({ query, category, exactName, offset, limit })
-        return ok(await canvas.staticSearch(`reference:${cacheKey}`, code, extra.signal))
-      }),
+      safely(async () =>
+        ok(await staticMaterial.referenceSearch({ query, category, exactName, offset, limit }, extra.signal)),
+      ),
   )
 
   server.registerTool(
@@ -105,35 +105,19 @@ export function createMcpServer(services: McpServices): McpServer {
       annotations: readOnly,
     },
     async ({ query, module, kind, limit }, extra) =>
-      safely(async () => {
-        const code = `const q=${JSON.stringify(query.toLowerCase())}, mod=${JSON.stringify(module ?? null)}, kind=${JSON.stringify(kind ?? null)}; const modules=api.imports.filter(m => !mod || m.module === mod).map(m => ({...m, exports: (m.exports ?? []).filter(e => (!kind || e.kind === kind) && (!q || e.name.toLowerCase().includes(q))).slice(0, ${limit})})); return { importCount: api.importCount, modules }`
-        const cacheKey = JSON.stringify({ query, module, kind, limit })
-        return ok(await canvas.staticSearch(`imports:${cacheKey}`, code, extra.signal))
-      }),
+      safely(async () => ok(await staticMaterial.importsSearch({ query, module, kind, limit }, extra.signal))),
   )
 
   server.registerTool(
     'tldraw_helpers_list',
     { description: 'Return documentation for all editor-bound helper functions available in exec and scripts.', annotations: readOnly },
-    async (extra) =>
-      safely(async () =>
-        ok(await canvas.staticSearch('helpers', 'return { helperCount: api.helperCount, helpers: api.helpers }', extra.signal)),
-      ),
+    async (extra) => safely(async () => ok(await staticMaterial.helpers(extra.signal))),
   )
 
   server.registerTool(
     'tldraw_recipes_list',
     { description: 'List all tldraw operator recipes by id, title, and intended use.', annotations: readOnly },
-    async (extra) =>
-      safely(async () =>
-        ok(
-          await canvas.staticSearch(
-            'recipes:list',
-            "return Object.values(api.recipes).map(({id,title,whenToUse}) => ({id,title,whenToUse}))",
-            extra.signal,
-          ),
-        ),
-      ),
+    async (extra) => safely(async () => ok(await staticMaterial.recipesList(extra.signal))),
   )
 
   server.registerTool(
@@ -143,16 +127,13 @@ export function createMcpServer(services: McpServices): McpServer {
       inputSchema: z.object({ id: z.string().min(1) }),
       annotations: readOnly,
     },
-    async ({ id }, extra) =>
-      safely(async () =>
-        ok(await canvas.staticSearch(`recipe:${id}`, `return api.recipes[${JSON.stringify(id)}] ?? null`, extra.signal)),
-      ),
+    async ({ id }, extra) => safely(async () => ok(await staticMaterial.recipe(id, extra.signal))),
   )
 
   server.registerTool(
     'tldraw_readme',
     { description: 'Read the live Canvas API documentation from the running tldraw app.', annotations: readOnly },
-    async (extra) => safely(async () => ok({ readme: await canvas.readme(extra.signal) })),
+    async (extra) => safely(async () => ok({ readme: await staticMaterial.readme(extra.signal) })),
   )
 
   server.registerTool(
@@ -299,7 +280,7 @@ export function createMcpServer(services: McpServices): McpServer {
     'tldraw-live-readme',
     'tldraw://readme',
     { title: 'Live tldraw Canvas API readme', description: 'Documentation from the currently running app', mimeType: 'text/markdown' },
-    async (uri, extra) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: await canvas.readme(extra.signal) }] }),
+    async (uri, extra) => ({ contents: [{ uri: uri.href, mimeType: 'text/markdown', text: await staticMaterial.readme(extra.signal) }] }),
   )
 
   return server

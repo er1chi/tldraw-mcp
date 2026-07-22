@@ -52,14 +52,6 @@ export type JsonValue =
 const MAX_REQUEST_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_MS = 100;
 const MAX_RETRY_DELAY_MS = 2_000;
-const STATIC_CACHE_TTL_MS = 5 * 60_000;
-const STATIC_CACHE_MAX_ENTRIES = 64;
-
-interface StaticCacheEntry {
-  sessionKey: string;
-  expiresAt: number;
-  value: unknown;
-}
 
 function mergedSignal(
   signal: AbortSignal | undefined,
@@ -144,7 +136,6 @@ function requestPath(path: string): string {
 export class CanvasApiClient {
   private serverState: ServerState;
   private lastKnownServerInfo: TldrawServerInfo | undefined;
-  private readonly staticCache = new Map<string, StaticCacheEntry>();
 
   constructor(
     private readonly config: AppConfig,
@@ -178,7 +169,6 @@ export class CanvasApiClient {
     } catch (error) {
       const unavailable = serverFileNotFound(error);
       this.serverState = { error: unavailable };
-      this.staticCache.clear();
       throw unavailable;
     }
 
@@ -187,28 +177,18 @@ export class CanvasApiClient {
       info = parseServerInfo(text);
     } catch (error) {
       this.serverState = { error: error as TldrawMcpError };
-      this.staticCache.clear();
       throw error;
     }
     const previous = this.lastKnownServerInfo;
     const changed = !previous || serverSessionKey(previous) !== serverSessionKey(info);
     this.serverState = { info };
     this.lastKnownServerInfo = info;
-    if (changed) {
-      this.staticCache.clear();
-      this.logSessionRefresh(previous, info);
-    }
+    if (changed) this.logSessionRefresh(previous, info);
     return serverSessionKey(info);
   }
 
   async readme(signal?: AbortSignal): Promise<string> {
-    return this.cachedStatic("readme", signal, async () =>
-      this.requestText("/readme", { method: "GET", signal })
-    );
-  }
-
-  async staticSearch<T = unknown>(cacheKey: string, code: string, signal?: AbortSignal): Promise<T> {
-    return this.cachedStatic(`search:${cacheKey}`, signal, async () => this.search<T>(code, signal));
+    return this.requestText("/readme", { method: "GET", signal });
   }
 
   async search<T = unknown>(code: string, signal?: AbortSignal): Promise<T> {
@@ -349,7 +329,6 @@ export class CanvasApiClient {
       const info = parseServerInfo(text);
       this.serverState = { info };
       this.lastKnownServerInfo = info;
-      this.staticCache.clear();
       this.logSessionRefresh(previous, info);
       return info;
     } catch (error) {
@@ -377,29 +356,6 @@ export class CanvasApiClient {
       startedAtChanged: previous ? previous.startedAt !== info.startedAt : undefined,
       tokenChanged: previous ? previous.token !== info.token : undefined,
     });
-  }
-
-  private async cachedStatic<T>(key: string, signal: AbortSignal | undefined, load: () => Promise<T>): Promise<T> {
-    const sessionKey = await this.sessionKey();
-    const cached = this.staticCache.get(key);
-    if (cached && cached.sessionKey === sessionKey && cached.expiresAt > Date.now()) {
-      this.staticCache.delete(key);
-      this.staticCache.set(key, cached);
-      return cached.value as T;
-    }
-    if (cached) this.staticCache.delete(key);
-
-    const value = await load();
-    const currentSessionKey = serverSessionKey(await this.serverInfo());
-    if (!signal?.aborted && currentSessionKey === sessionKey) {
-      while (this.staticCache.size >= STATIC_CACHE_MAX_ENTRIES) {
-        const oldest = this.staticCache.keys().next().value as string | undefined;
-        if (oldest === undefined) break;
-        this.staticCache.delete(oldest);
-      }
-      this.staticCache.set(key, { sessionKey, expiresAt: Date.now() + STATIC_CACHE_TTL_MS, value });
-    }
-    return value;
   }
 
   private async fetchWithRetry(

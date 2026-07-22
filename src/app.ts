@@ -6,13 +6,15 @@ import { createMcpServer } from "./mcp/create-server.ts";
 import { bearerAuth, securityMiddleware } from "./security/http-security.ts";
 import { CanvasApiClient } from "./tldraw/canvas-api-client.ts";
 import { ScreenshotService } from "./tldraw/screenshot-service.ts";
+import { StaticMaterialService } from "./tldraw/static-material-service.ts";
 import { WorkspaceService } from "./tldraw/workspace-service.ts";
 
 export function createApp(config: AppConfig): Hono {
   const canvas = new CanvasApiClient(config);
   const workspace = new WorkspaceService(canvas, config);
   const screenshots = new ScreenshotService(canvas, config);
-  const services = { canvas, workspace, screenshots };
+  const staticMaterial = new StaticMaterialService(canvas);
+  const services = { canvas, workspace, screenshots, staticMaterial };
 
   const app = new Hono();
   app.use("*", requestLogger());
