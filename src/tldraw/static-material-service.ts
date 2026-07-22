@@ -6,9 +6,11 @@ interface ReferenceMember {
   [key: string]: unknown;
 }
 
-interface ReferenceCatalog {
+interface ReferenceSearchResult {
   memberCount: number;
   categories: string[];
+  total: number;
+  offset: number;
   members: ReferenceMember[];
 }
 
@@ -44,13 +46,43 @@ interface Recipe {
 
 interface StaticMaterials {
   readme: string;
-  references: ReferenceCatalog;
-  imports: ImportCatalog;
   helpers: HelperCatalog;
   recipes: Record<string, Recipe>;
 }
 
 type StaticMaterialKey = keyof StaticMaterials;
+
+const REFERENCE_SEARCH_PROGRAM = `
+const query = input.query.toLowerCase()
+const matches = api.members.filter(member =>
+  (!input.exactName || member.name === input.exactName) &&
+  (!input.category || member.category === input.category) &&
+  (!query || JSON.stringify(member).toLowerCase().includes(query))
+)
+return {
+  memberCount: api.memberCount,
+  categories: api.categories,
+  total: matches.length,
+  offset: input.offset,
+  members: matches.slice(input.offset, input.offset + input.limit),
+}
+`;
+
+const IMPORT_SEARCH_PROGRAM = `
+const query = input.query.toLowerCase()
+const modules = api.imports
+  .filter(entry => !input.module || entry.module === input.module)
+  .map(entry => ({
+    ...entry,
+    exports: (entry.exports ?? [])
+      .filter(item =>
+        (!input.kind || item.kind === input.kind) &&
+        (!query || item.name.toLowerCase().includes(query))
+      )
+      .slice(0, input.limit),
+  }))
+return { importCount: api.importCount, modules }
+`;
 
 export interface ReferenceSearchOptions {
   query: string;
@@ -68,9 +100,9 @@ export interface ImportSearchOptions {
 }
 
 /**
- * Owns the five immutable Canvas API catalogs. Values live for exactly one tldraw
- * per-launch session; checking sessionKey before every read prevents stale data from
- * surviving a removed or replaced server.json. Live canvas state never enters this cache.
+ * Caches bounded, immutable Canvas API material for one tldraw launch. Large searchable
+ * catalogs stay upstream so filtering and pagination happen before transport limits apply.
+ * Checking sessionKey before cached reads prevents values surviving an app restart.
  */
 export class StaticMaterialService {
   private sessionKey: string | undefined;
@@ -100,58 +132,14 @@ export class StaticMaterialService {
     return (await this.recipes(signal))[id] ?? null;
   }
 
-  async referenceSearch(options: ReferenceSearchOptions, signal?: AbortSignal): Promise<{
-    memberCount: number;
-    categories: string[];
-    total: number;
-    offset: number;
-    members: ReferenceMember[];
-  }> {
-    const catalog = await this.get("references", () =>
-      this.canvas.search<ReferenceCatalog>(
-        "return { memberCount: api.memberCount, categories: api.categories, members: api.members }",
-        signal,
-      ),
-    );
-    const query = options.query.toLowerCase();
-    const matches = catalog.members.filter(
-      (member) =>
-        (!options.exactName || member.name === options.exactName) &&
-        (!options.category || member.category === options.category) &&
-        (!query || JSON.stringify(member).toLowerCase().includes(query)),
-    );
-    return {
-      memberCount: catalog.memberCount,
-      categories: catalog.categories,
-      total: matches.length,
-      offset: options.offset,
-      members: matches.slice(options.offset, options.offset + options.limit),
-    };
+  async referenceSearch(options: ReferenceSearchOptions, signal?: AbortSignal): Promise<ReferenceSearchResult> {
+    const input = JSON.stringify(options);
+    return this.canvas.search<ReferenceSearchResult>(`const input = ${input}\n${REFERENCE_SEARCH_PROGRAM}`, signal);
   }
 
   async importsSearch(options: ImportSearchOptions, signal?: AbortSignal): Promise<ImportCatalog> {
-    const catalog = await this.get("imports", () =>
-      this.canvas.search<ImportCatalog>(
-        "return { importCount: api.importCount, modules: api.imports }",
-        signal,
-      ),
-    );
-    const query = options.query.toLowerCase();
-    return {
-      importCount: catalog.importCount,
-      modules: catalog.modules
-        .filter((entry) => !options.module || entry.module === options.module)
-        .map((entry) => ({
-          ...entry,
-          exports: (entry.exports ?? [])
-            .filter(
-              (item) =>
-                (!options.kind || item.kind === options.kind) &&
-                (!query || item.name.toLowerCase().includes(query)),
-            )
-            .slice(0, options.limit),
-        })),
-    };
+    const input = JSON.stringify(options);
+    return this.canvas.search<ImportCatalog>(`const input = ${input}\n${IMPORT_SEARCH_PROGRAM}`, signal);
   }
 
   private async recipes(signal?: AbortSignal): Promise<Record<string, Recipe>> {

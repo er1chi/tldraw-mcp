@@ -23,8 +23,30 @@ function config(tldrawServerJson: string): AppConfig {
 }
 
 describe("StaticMaterialService", () => {
-  test("loads each static catalog once and filters cached catalogs locally", async () => {
+  test("caches bounded material while filtering large catalogs upstream", async () => {
     const calls = { readme: 0, references: 0, imports: 0, helpers: 0, recipes: 0 };
+    const searchPrograms: string[] = [];
+    const api = {
+      memberCount: 2,
+      categories: ["shapes", "camera"],
+      members: [
+        { name: "createShape", category: "shapes", description: "Create a shape" },
+        { name: "zoomIn", category: "camera", description: "Zoom in" },
+      ],
+      importCount: 2,
+      imports: [
+        {
+          module: "tldraw",
+          exports: [
+            { name: "createShapeId", kind: "function" },
+            { name: "ShapeUtil", kind: "class" },
+          ],
+        },
+      ],
+      helperCount: 1,
+      helpers: [{ name: "boxShapes" }],
+      recipes: { stack: { id: "stack", title: "Stack", whenToUse: "Arrange shapes", body: "Steps" } },
+    };
     const canvas = {
       sessionKey: async () => "session:1",
       readme: async () => {
@@ -32,33 +54,14 @@ describe("StaticMaterialService", () => {
         return "readme";
       },
       search: async (code: string) => {
-        if (code.includes("api.members")) {
-          calls.references += 1;
-          return {
-            memberCount: 2,
-            categories: ["shapes", "camera"],
-            members: [
-              { name: "createShape", category: "shapes", description: "Create a shape" },
-              { name: "zoomIn", category: "camera", description: "Zoom in" },
-            ],
-          };
-        }
-        if (code.includes("api.imports")) {
-          calls.imports += 1;
-          return {
-            importCount: 2,
-            modules: [{ module: "tldraw", exports: [{ name: "createShapeId", kind: "function" }, { name: "ShapeUtil", kind: "class" }] }],
-          };
-        }
-        if (code.includes("api.helpers")) {
-          calls.helpers += 1;
-          return { helperCount: 1, helpers: [{ name: "boxShapes" }] };
-        }
-        if (code.includes("api.recipes")) {
-          calls.recipes += 1;
-          return { stack: { id: "stack", title: "Stack", whenToUse: "Arrange shapes", body: "Steps" } };
-        }
-        throw new Error(`Unexpected search: ${code}`);
+        searchPrograms.push(code);
+        if (code.includes("api.members")) calls.references += 1;
+        else if (code.includes("api.imports")) calls.imports += 1;
+        else if (code.includes("api.helpers")) calls.helpers += 1;
+        else if (code.includes("api.recipes")) calls.recipes += 1;
+        else throw new Error(`Unexpected search: ${code}`);
+        const execute = new Function("api", `return (async () => {${code}})()`) as (value: unknown) => Promise<unknown>;
+        return execute(api);
       },
     } as unknown as CanvasApiClient;
     const material = new StaticMaterialService(canvas);
@@ -74,7 +77,17 @@ describe("StaticMaterialService", () => {
     expect(await material.recipesList()).toEqual([{ id: "stack", title: "Stack", whenToUse: "Arrange shapes" }]);
     expect(await material.recipe("stack")).toMatchObject({ body: "Steps" });
 
-    expect(calls).toEqual({ readme: 1, references: 1, imports: 1, helpers: 1, recipes: 1 });
+    expect(calls).toEqual({ readme: 1, references: 2, imports: 2, helpers: 1, recipes: 1 });
+    expect(
+      searchPrograms
+        .filter((code) => code.includes("api.members"))
+        .every((code) => code.includes("matches.slice(input.offset, input.offset + input.limit)")),
+    ).toBe(true);
+    expect(
+      searchPrograms
+        .filter((code) => code.includes("api.imports"))
+        .every((code) => code.includes(".slice(0, input.limit)")),
+    ).toBe(true);
   });
 
   test("invalidates static values after server.json is removed or replaced without caching live searches", async () => {
