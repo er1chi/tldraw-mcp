@@ -24,6 +24,12 @@ interface AppEnvelope<T> {
   message?: string;
 }
 
+// the nature of caching or not caching these values is highly dependent on actual app behavior
+// from tldraw-offline
+// from a high level review, models safely assume some values here are mutable and as such,
+// should not be cached
+// need to manually review tldraw-offline behavior for script-workspace and act accordingly
+// removal of caching behavior work done in commit 7240d1df
 export interface ScriptWorkspaceResult {
   scriptDir: string;
   mainJsPath: string;
