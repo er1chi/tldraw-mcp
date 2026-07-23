@@ -1,0 +1,14 @@
+{
+  "tags": [
+    "bun",
+    "hono",
+    "mcp",
+    "node"
+  ],
+  "sentinels": [
+    "bun.lock",
+    "package.json"
+  ],
+  "detectedAt": "2026-07-23T15:21:40.839Z",
+  "rootPath": "/Users/c1re/Developer/infra/mbp/tldraw-offline-mcp"
+}
