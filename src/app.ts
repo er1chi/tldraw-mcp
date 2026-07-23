@@ -3,7 +3,11 @@ import { Hono } from "hono";
 import type { AppConfig } from "./config.ts";
 import { requestLogger } from "./logging/http-logger.ts";
 import { createMcpServer } from "./mcp/create-server.ts";
-import { bearerAuth, securityMiddleware } from "./security/http-security.ts";
+import {
+  bearerAuth,
+  requestBodyLimit,
+  securityMiddleware,
+} from "./security/http-security.ts";
 import { CanvasApiClient } from "./tldraw/canvas-api-client.ts";
 import { DocumentInspectionService } from "./tldraw/document-inspection-service.ts";
 import { ScreenshotService } from "./tldraw/screenshot-service.ts";
@@ -19,14 +23,16 @@ export function createApp(config: AppConfig): Hono {
   const services = { canvas, documents, workspace, screenshots, staticMaterial };
 
   const app = new Hono();
-  app.use("*", requestLogger());
   app.use("*", securityMiddleware(config));
+  app.use("/readyz", bearerAuth(config));
+  app.use("/mcp", bearerAuth(config));
+  app.use("/mcp", requestBodyLimit(config.maxRequestBytes));
+  app.use("*", requestLogger());
 
   app.get("/healthz", (c) =>
     c.json({ status: "ok", service: "tldraw-offline-mcp" }),
   );
 
-  app.use("/readyz", bearerAuth(config));
   app.get("/readyz", async (c) => {
     try {
       await canvas.search("return true", c.req.raw.signal);
@@ -42,7 +48,6 @@ export function createApp(config: AppConfig): Hono {
     }
   });
 
-  app.use("/mcp", bearerAuth(config));
   app.all("/mcp", async (c) => {
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

@@ -17,15 +17,30 @@ interface McpBodySummary {
   batch?: boolean
   messageCount?: number
   messages?: JsonRpcMessageSummary[]
+  messagesTruncated?: true
+  summarySkipped?: 'body-too-large'
   parseError?: true
 }
 
-export function requestLogger(): MiddlewareHandler {
+interface McpSummaryOptions {
+  maxBytes?: number
+  maxMessages?: number
+}
+
+const DEFAULT_MAX_MCP_SUMMARY_BYTES = 64 * 1024
+const DEFAULT_MAX_MCP_SUMMARY_MESSAGES = 20
+
+export function requestLogger(options: McpSummaryOptions = {}): MiddlewareHandler {
+  const summaryOptions = {
+    maxBytes: options.maxBytes ?? DEFAULT_MAX_MCP_SUMMARY_BYTES,
+    maxMessages: options.maxMessages ?? DEFAULT_MAX_MCP_SUMMARY_MESSAGES,
+  }
+
   return async (c, next) => {
     const startedAt = performance.now()
     const requestId = c.req.header('x-request-id') || randomUUID()
     const isMcp = c.req.path === '/mcp'
-    const mcp = isMcp ? await summarizeMcpBody(c.req.raw) : undefined
+    const mcp = isMcp ? await summarizeMcpBody(c.req.raw, summaryOptions) : undefined
 
     c.header('x-request-id', requestId)
     writeLog({
@@ -68,20 +83,59 @@ export function requestLogger(): MiddlewareHandler {
   }
 }
 
-export async function summarizeMcpBody(request: Request): Promise<McpBodySummary | undefined> {
+export async function summarizeMcpBody(
+  request: Request,
+  options: McpSummaryOptions = {},
+): Promise<McpBodySummary | undefined> {
   if (request.method !== 'POST') return undefined
 
+  const maxBytes = options.maxBytes ?? DEFAULT_MAX_MCP_SUMMARY_BYTES
+  const maxMessages = options.maxMessages ?? DEFAULT_MAX_MCP_SUMMARY_MESSAGES
+
   try {
-    const payload: unknown = await request.clone().json()
+    const bytes = await readBodyUpTo(request.clone(), maxBytes)
+    if (!bytes) return { summarySkipped: 'body-too-large' }
+
+    const payload: unknown = JSON.parse(new TextDecoder().decode(bytes))
     const values = Array.isArray(payload) ? payload : [payload]
+    const messages = values.slice(0, maxMessages).map(summarizeJsonRpcMessage)
     return {
       batch: Array.isArray(payload),
       messageCount: values.length,
-      messages: values.map(summarizeJsonRpcMessage),
+      messages,
+      messagesTruncated: messages.length < values.length ? true : undefined,
     }
   } catch {
     return { parseError: true }
   }
+}
+
+async function readBodyUpTo(request: Request, maxBytes: number): Promise<Uint8Array | undefined> {
+  if (!request.body) return new Uint8Array()
+
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    size += value.byteLength
+    if (size > maxBytes) {
+      void reader.cancel().catch(() => undefined)
+      return undefined
+    }
+    chunks.push(value)
+  }
+
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bytes
 }
 
 function summarizeJsonRpcMessage(value: unknown): JsonRpcMessageSummary {

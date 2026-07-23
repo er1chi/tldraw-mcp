@@ -8,6 +8,7 @@ const server = Bun.serve({
   hostname: config.host,
   port: config.port,
   idleTimeout: config.idleTimeoutSeconds,
+  maxRequestBodySize: config.maxRequestBytes,
   fetch: app.fetch,
 })
 

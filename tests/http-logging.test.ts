@@ -57,4 +57,34 @@ describe('MCP request logging', () => {
     expect(JSON.stringify(summary)).not.toContain('secret-doc')
     expect(JSON.stringify(summary)).not.toContain('secret-code')
   })
+
+  test('bounds the number of summarized batch messages', async () => {
+    const payload = Array.from({ length: 25 }, (_, id) => ({ jsonrpc: '2.0', id, method: 'ping' }))
+    const request = new Request('http://localhost/mcp', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+
+    const summary = await summarizeMcpBody(request, { maxBytes: 64 * 1024, maxMessages: 3 })
+
+    expect(summary).toMatchObject({
+      batch: true,
+      messageCount: 25,
+      messagesTruncated: true,
+    })
+    expect(summary?.messages).toHaveLength(3)
+  })
+
+  test('skips JSON parsing when the body exceeds the summary byte cap', async () => {
+    const request = new Request('http://localhost/mcp', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 'x'.repeat(128) }),
+    })
+
+    expect(await summarizeMcpBody(request, { maxBytes: 32 })).toEqual({
+      summarySkipped: 'body-too-large',
+    })
+  })
 })

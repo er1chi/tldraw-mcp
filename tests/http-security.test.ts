@@ -35,11 +35,65 @@ describe('HTTP security', () => {
     expect((await app.request('http://localhost/readyz')).status).toBe(401)
   })
 
+  test('does not read an unauthenticated MCP request body', async () => {
+    let pulls = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulls += 1
+          controller.enqueue(new Uint8Array([123, 125]))
+          controller.close()
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    const request = new Request('http://localhost/mcp', {
+      method: 'POST',
+      body,
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' })
+
+    const response = await app.fetch(request)
+
+    expect(response.status).toBe(401)
+    expect(pulls).toBe(0)
+  })
+
   test('rejects an incorrect bearer token', async () => {
     const headers = { authorization: 'Bearer incorrect-token-that-is-at-least-32-characters' }
 
     expect((await app.request('http://localhost/mcp', { method: 'POST', headers })).status).toBe(401)
     expect((await app.request('http://localhost/readyz', { headers })).status).toBe(401)
+  })
+
+  test('enforces the actual MCP body size without trusting Content-Length', async () => {
+    const limitedApp = createApp({ ...config, maxRequestBytes: 64 })
+    const oversizedBody = JSON.stringify({ value: 'x'.repeat(128) })
+
+    const missingLength = await limitedApp.request('http://localhost/mcp', {
+      method: 'POST',
+      headers: authenticatedHeaders,
+      body: oversizedBody,
+    })
+    const understatedLength = await limitedApp.request('http://localhost/mcp', {
+      method: 'POST',
+      headers: { ...authenticatedHeaders, 'content-length': '1' },
+      body: oversizedBody,
+    })
+
+    expect(missingLength.status).toBe(413)
+    expect(understatedLength.status).toBe(413)
+  })
+
+  test('rejects malformed Content-Length headers', async () => {
+    const response = await app.request('http://localhost/mcp', {
+      method: 'POST',
+      headers: { ...authenticatedHeaders, 'content-length': 'not-a-number' },
+      body: '{}',
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: 'Invalid Content-Length' })
   })
 
   test('accepts the correct bearer token for MCP requests', async () => {
