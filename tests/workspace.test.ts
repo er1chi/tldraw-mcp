@@ -106,6 +106,32 @@ describe('WorkspaceService', () => {
     expect(scriptWorkspaceCalls).toBe(4)
   })
 
+  test('enforces file limits before reads and while listing workspace files', async () => {
+    const maxFileBytes = 48
+    const limited = new WorkspaceService(
+      {
+        scriptWorkspace: async () => workspace,
+        scriptStatus: async () => ({ state: 'applied' }),
+      } as unknown as CanvasApiClient,
+      { ...config, maxFileBytes },
+    )
+    const accepted = new Uint8Array(32).fill(7)
+    await writeFile(join(root, 'assets/accepted.bin'), accepted)
+
+    const files = await limited.list('doc:test')
+    expect(files.find((file) => file.path === 'assets/accepted.bin')).toMatchObject({
+      size: accepted.byteLength,
+      sha256: createHash('sha256').update(accepted).digest('hex'),
+    })
+
+    await writeFile(join(root, 'assets/oversized.bin'), new Uint8Array(maxFileBytes + 1))
+    await expect(limited.read('doc:test', 'assets/oversized.bin')).rejects.toMatchObject({ code: 'FILE_TOO_LARGE' })
+    await expect(limited.list('doc:test')).rejects.toMatchObject({
+      code: 'FILE_TOO_LARGE',
+      message: `assets/oversized.bin is ${maxFileBytes + 1} bytes; limit is ${maxFileBytes}`,
+    })
+  })
+
   test('requires and enforces SHA preconditions for existing scripts', async () => {
     const original = await readFile(join(root, 'script/main.js'), 'utf8')
     const hash = createHash('sha256').update(original).digest('hex')

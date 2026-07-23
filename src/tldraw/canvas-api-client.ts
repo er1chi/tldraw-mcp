@@ -260,8 +260,7 @@ export class CanvasApiClient {
     init: RequestInit,
   ): Promise<T> {
     const response = await this.fetchWithRetry(path, init);
-    const raw = await response.text();
-    this.assertSize(raw.length);
+    const raw = await this.readResponseText(response);
 
     let payload: AppEnvelope<T>;
     try {
@@ -286,8 +285,7 @@ export class CanvasApiClient {
 
   private async requestText(path: string, init: RequestInit): Promise<string> {
     const response = await this.fetchWithRetry(path, init);
-    const text = await response.text();
-    this.assertSize(text.length);
+    const text = await this.readResponseText(response);
     if (!response.ok)
       throw new TldrawMcpError(
         `tldraw request failed (${response.status})`,
@@ -297,13 +295,39 @@ export class CanvasApiClient {
     return text;
   }
 
-  private assertSize(length: number): void {
-    if (length > this.config.maxResultBytes) {
-      throw new TldrawMcpError(
-        `tldraw response is ${length} bytes; limit is ${this.config.maxResultBytes}. Narrow or paginate the query.`,
-        "RESULT_TOO_LARGE",
-      );
+  private async readResponseText(response: Response): Promise<string> {
+    if (!response.body) return "";
+
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > this.config.maxResultBytes) {
+          // Cancel the body immediately so an oversized or unbounded upstream response
+          // does not continue consuming network, memory, and CPU resources.
+          await reader.cancel().catch(() => undefined);
+          throw new TldrawMcpError(
+            `tldraw response exceeds ${this.config.maxResultBytes} bytes (received ${length}). Narrow or paginate the query.`,
+            "RESULT_TOO_LARGE",
+          );
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
     }
+
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(bytes);
   }
 
   private readServerJsonFileSync(): ServerState {

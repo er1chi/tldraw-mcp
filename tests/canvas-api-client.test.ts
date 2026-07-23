@@ -5,7 +5,7 @@ import { describe, expect, test } from 'bun:test'
 import type { AppConfig } from '../src/config.ts'
 import { CanvasApiClient } from '../src/tldraw/canvas-api-client.ts'
 
-function config(tldrawServerJson: string): AppConfig {
+function config(tldrawServerJson: string, overrides: Partial<AppConfig> = {}): AppConfig {
   return {
     host: '127.0.0.1',
     port: 7237,
@@ -18,6 +18,7 @@ function config(tldrawServerJson: string): AppConfig {
     maxResultBytes: 1024 * 1024,
     maxFileBytes: 1024 * 1024,
     maxImageBytes: 1024 * 1024,
+    ...overrides,
   }
 }
 
@@ -136,6 +137,44 @@ describe('CanvasApiClient server sessions', () => {
       })
     } finally {
       await stale.stop(true)
+      await upstream.stop(true)
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects oversized envelope and text streams before buffering the full response', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'canvas-api-client-test-'))
+    const serverJson = join(directory, 'server.json')
+    const chunksSent = { envelope: 0, text: 0 }
+    const stream = (kind: keyof typeof chunksSent) =>
+      new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          await Bun.sleep(1)
+          chunksSent[kind] += 1
+          controller.enqueue(new Uint8Array(32).fill(97))
+          if (chunksSent[kind] === 100) controller.close()
+        },
+      })
+    const upstream = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch(request) {
+        const kind = new URL(request.url).pathname === '/readme' ? 'text' : 'envelope'
+        return new Response(stream(kind))
+      },
+    })
+    const upstreamPort = upstream.port
+    if (upstreamPort === undefined) throw new Error('Test server did not bind a port')
+
+    try {
+      await writeFile(serverJson, JSON.stringify({ port: upstreamPort, token: 'canvas-token' }))
+      const client = new CanvasApiClient(config(serverJson, { maxResultBytes: 64 }), () => {})
+
+      await expect(client.search('return true')).rejects.toMatchObject({ code: 'RESULT_TOO_LARGE' })
+      expect(chunksSent.envelope).toBeLessThan(100)
+      await expect(client.readme()).rejects.toMatchObject({ code: 'RESULT_TOO_LARGE' })
+      expect(chunksSent.text).toBeLessThan(100)
+    } finally {
       await upstream.stop(true)
       await rm(directory, { recursive: true, force: true })
     }

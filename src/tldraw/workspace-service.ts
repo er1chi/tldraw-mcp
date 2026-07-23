@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { lstat, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -100,10 +101,7 @@ export class WorkspaceService {
   ): Promise<{ path: string; encoding: 'utf8' | 'base64'; content: string; size: number; sha256: string; truncated: boolean }> {
     const workspace = await this.client.scriptWorkspace(documentId, signal)
     const target = await this.resolvePath(workspace, virtualPath, false)
-    const bytes = new Uint8Array(await readFile(target.absolutePath))
-    if (bytes.byteLength > this.config.maxFileBytes) {
-      throw new TldrawMcpError(`File is ${bytes.byteLength} bytes; limit is ${this.config.maxFileBytes}`, 'FILE_TOO_LARGE')
-    }
+    const bytes = await readRegularFile(target.absolutePath, this.config.maxFileBytes, 'File')
     const offset = options.offset ?? 0
     const limit = options.limit ?? bytes.byteLength
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit <= 0) {
@@ -160,7 +158,7 @@ export class WorkspaceService {
       if (paths.has(virtualPath)) throw new TldrawMcpError(`Duplicate batch path: ${virtualPath}`, 'DUPLICATE_PATH')
       paths.add(virtualPath)
       const target = await this.resolvePath(workspace, virtualPath, true, true)
-      const existing = await readExisting(target.absolutePath)
+      const existing = await readExisting(target.absolutePath, this.config.maxFileBytes, virtualPath)
       const beforeSha256 = existing ? sha256(existing) : null
 
       if (operation.op === 'delete') {
@@ -202,7 +200,7 @@ export class WorkspaceService {
     for (const item of writes) await writeFile(item.target.absolutePath, item.bytes, { mode: 0o600 })
     for (const item of deletes) await rm(item.target.absolutePath)
     if (deletes.length > 0 && !writes.some((item) => item.target.virtualPath === 'script/main.js')) {
-      const mainBytes = await readFile(workspace.mainJsPath)
+      const mainBytes = await readRegularFile(workspace.mainJsPath, this.config.maxFileBytes, 'script/main.js')
       await writeFile(workspace.mainJsPath, mainBytes, { mode: 0o600 })
     }
 
@@ -246,7 +244,7 @@ export class WorkspaceService {
     ]
     for (const [virtualPath, absolutePath] of tooling) {
       try {
-        files.push(await describeFile(virtualPath, absolutePath, false))
+        files.push(await describeFile(virtualPath, absolutePath, false, this.config.maxFileBytes))
       } catch (error) {
         if (!isMissing(error)) throw error
       }
@@ -267,7 +265,7 @@ export class WorkspaceService {
       const absolutePath = join(base, entry.name)
       const virtualPath = `${prefix}/${entry.name}`
       if (entry.isDirectory()) await this.walk(absolutePath, virtualPath, writable, output)
-      else if (entry.isFile()) output.push(await describeFile(virtualPath, absolutePath, writable))
+      else if (entry.isFile()) output.push(await describeFile(virtualPath, absolutePath, writable, this.config.maxFileBytes))
     }
   }
 
@@ -367,15 +365,25 @@ async function ensureSafeParent(target: ResolvedPath): Promise<void> {
   }
 }
 
-async function readExisting(path: string): Promise<Uint8Array | null> {
+async function readExisting(path: string, maxBytes: number, label: string): Promise<Uint8Array | null> {
   try {
-    const info = await lstat(path)
-    if (info.isSymbolicLink() || !info.isFile()) throw new TldrawMcpError('Target must be a regular file', 'INVALID_FILE_TYPE')
-    return new Uint8Array(await readFile(path))
+    return await readRegularFile(path, maxBytes, label)
   } catch (error) {
     if (isMissing(error)) return null
     throw error
   }
+}
+
+async function readRegularFile(path: string, maxBytes: number, label: string): Promise<Uint8Array> {
+  const info = await lstat(path)
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new TldrawMcpError('Target must be a regular file', 'INVALID_FILE_TYPE')
+  }
+  assertFileSize(info.size, maxBytes, label)
+  const bytes = new Uint8Array(await readFile(path))
+  // Keep the limit enforced if the file grows between the metadata check and read.
+  assertFileSize(bytes.byteLength, maxBytes, label)
+  return bytes
 }
 
 function assertExpected(path: string, expected: string | undefined, actual: string | null): void {
@@ -420,16 +428,40 @@ function sha256(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-async function describeFile(virtualPath: string, absolutePath: string, writable: boolean): Promise<WorkspaceFile> {
+async function describeFile(
+  virtualPath: string,
+  absolutePath: string,
+  writable: boolean,
+  maxBytes: number,
+): Promise<WorkspaceFile> {
   const info = await stat(absolutePath)
-  const bytes = new Uint8Array(await readFile(absolutePath))
+  if (!info.isFile()) throw new TldrawMcpError('Target must be a regular file', 'INVALID_FILE_TYPE')
+  assertFileSize(info.size, maxBytes, virtualPath)
+  const hashed = await hashFile(absolutePath, maxBytes, virtualPath)
   return {
     path: virtualPath,
     kind: looksText(virtualPath) ? 'text' : 'binary',
     writable,
-    size: info.size,
-    sha256: sha256(bytes),
+    size: hashed.size,
+    sha256: hashed.sha256,
     modifiedAt: info.mtime.toISOString(),
+  }
+}
+
+async function hashFile(path: string, maxBytes: number, label: string): Promise<{ size: number; sha256: string }> {
+  const hash = createHash('sha256')
+  let size = 0
+  for await (const chunk of createReadStream(path)) {
+    size += chunk.byteLength
+    assertFileSize(size, maxBytes, label)
+    hash.update(chunk)
+  }
+  return { size, sha256: hash.digest('hex') }
+}
+
+function assertFileSize(size: number, maxBytes: number, label: string): void {
+  if (size > maxBytes) {
+    throw new TldrawMcpError(`${label} is ${size} bytes; limit is ${maxBytes}`, 'FILE_TOO_LARGE')
   }
 }
 
