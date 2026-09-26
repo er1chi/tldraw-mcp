@@ -19,7 +19,7 @@ The server runs on the Mac beside tldraw. Remote clients receive virtual workspa
 ## Install
 
 ```bash
-cd /Users/c1re/Developer/infra/mbp/tldraw-offline-mcp
+`git clone https://github.com/er1chi/tldraw-mcp.git`
 bun install
 bun run check
 ```
